@@ -1,8 +1,10 @@
 # app.py
+import os
 import numpy as np
 import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
+from skimage.restoration import denoise_tv_chambolle
 
 st.set_page_config(page_title="SENSE Energy Analysis", layout="wide")
 
@@ -83,35 +85,9 @@ def smooth_derivative(x, y, weight=0.1):
     return np.gradient(y_smooth, x)
 
 
-def _denoise_tv_1d(f, weight, n_iter=300):
-    """1D Total Variation denoising via Chambolle-Pock PDHG."""
-    f = np.asarray(f, dtype=float)
-    n = len(f)
-    tau = sigma = 0.24   # tau*sigma*||D||^2 = 0.24^2*4 = 0.23 < 1
-    u = f.copy()
-    u_bar = f.copy()
-    p = np.zeros(n - 1)
-    for _ in range(n_iter):
-        p = np.clip(p + sigma * (u_bar[1:] - u_bar[:-1]), -weight, weight)
-        DtP = np.zeros(n)
-        DtP[:-1] -= p
-        DtP[1:] += p
-        u_new = (u - tau * DtP + tau * f) / (1 + tau)
-        u_bar = 2 * u_new - u
-        u = u_new
-    return u
-
-
 def tv_derivative(x, y, weight=0.3):
-    """TV-denoise y then differentiate (matches notebook's denoise_tv_chambolle approach).
-    Normalises by a noise estimate (MAD of first differences) so weight is scale-independent
-    and the full slider range remains useful without premature saturation."""
     y = np.asarray(y, dtype=float)
-    # Robust noise estimate: MAD of first differences (Donoho-style)
-    noise_est = np.median(np.abs(np.diff(y))) / (np.sqrt(2) * 0.6745)
-    if noise_est < 1e-10:
-        return np.zeros_like(y)
-    y_tv = _denoise_tv_1d(y / noise_est, weight) * noise_est
+    y_tv = denoise_tv_chambolle(y, weight=weight)
     return np.gradient(y_tv, x)
 
 
@@ -206,19 +182,10 @@ def analyze(data_dict, C, K, zero_range, ch_labels=None, time_range=None,
 # Helpers
 # ----------------------------
 # Sensor → internal channel name, in order
-SENSE_CHANNELS = [("A1", "Ch0"), ("A2", "Ch1"), ("B1", "Ch2"), ("B2", "Ch3")]
-
 
 def _to_float64(arr: pd.Series) -> np.ndarray:
     return pd.to_numeric(arr, errors="coerce").astype("float64").to_numpy()
 
-
-def _find_col(cols, prefix):
-    """Return the first column name that starts with prefix."""
-    for c in cols:
-        if c.startswith(prefix):
-            return c
-    return None
 
 
 def _drop_nans(t, T, label, warnings):
@@ -260,44 +227,81 @@ def infer_schema_and_build(df: pd.DataFrame):
         ch_labels = {"Ch0": "Ch0", "Ch1": "Ch1", "Ch2": "Ch2", "Ch3": "Ch3"}
         return data_dict, "standard", ch_labels, warnings
 
-    # ── Schema B: SENSE per-channel timestamps (A1/A2/B1/B2 + BlockRef) ──────
-    br_t_col   = _find_col(cols, "BlockRef_Timestamp")
-    br_temp_col = _find_col(cols, "BlockRef_Temp")
+    # ── Per-channel detection (flexible suffixes, any naming convention) ───────
+    # Accepted suffixes for time, temperature, and annotation columns
+    TIME_SFXS = ["_Timestamp (s)", "_Timestamp", "_Time", "_time", "_timestamp"]
+    TEMP_SFXS = ["_Temp (C)", "_Temperature (C)", "_Temp", "_Temperature", "_temp"]
+    ANN_SFXS  = ["_Annotations", "_Annotation", "_annotations", "_annotation"]
 
-    if br_t_col and br_temp_col:
-        br_t, br_T = _drop_nans(
-            _to_float64(df[br_t_col]),
-            _to_float64(df[br_temp_col]),
-            "BlockRef", warnings
-        )
+    def _match_suffix(col, sfx_list):
+        for sfx in sfx_list:
+            if col.endswith(sfx):
+                return sfx
+        return None
 
-        data_dict = {"BlockRef": {"time": br_t, "temp": br_T}}
-        ch_labels = {}
-        found_any = False
+    # Build groups keyed by prefix
+    groups = {}
+    for c in cols:
+        for sfx_list, key in [(TIME_SFXS, "time_col"), (TEMP_SFXS, "temp_col"), (ANN_SFXS, "ann_col")]:
+            sfx = _match_suffix(c, sfx_list)
+            if sfx:
+                prefix = c[: -len(sfx)]
+                groups.setdefault(prefix, {})[key] = c
+                break
 
-        for sensor, ch_name in SENSE_CHANNELS:
-            t_col   = _find_col(cols, f"{sensor}_Timestamp")
-            temp_col = _find_col(cols, f"{sensor}_Temp")
+    # Only keep groups that have both a time and a temp column
+    valid = {p: g for p, g in groups.items() if "time_col" in g and "temp_col" in g}
 
-            if t_col and temp_col:
-                ch_t, ch_T = _drop_nans(
-                    _to_float64(df[t_col]),
-                    _to_float64(df[temp_col]),
-                    sensor, warnings
+    if len(valid) >= 2:
+        # 1. Prefer name-based BlockRef detection ("block" anywhere in prefix)
+        block_prefix = next((p for p in valid if "block" in p.lower()), None)
+
+        # 2. Fallback: TagID annotation heuristic (channels with TagID → sensors; without → BlockRef)
+        if block_prefix is None:
+            tagged = {
+                p for p, g in valid.items()
+                if g.get("ann_col") and
+                df[g["ann_col"]].astype(str).str.contains("TagID:", na=False).any()
+            }
+            untagged = [p for p in valid if p not in tagged]
+            if tagged and untagged:
+                block_prefix = untagged[0]
+
+        if block_prefix:
+            sensor_prefixes = [p for p in valid if p != block_prefix]
+            if sensor_prefixes:
+                bg = valid[block_prefix]
+                br_t, br_T = _drop_nans(
+                    _to_float64(df[bg["time_col"]]),
+                    _to_float64(df[bg["temp_col"]]),
+                    "BlockRef", warnings,
                 )
-                data_dict[ch_name] = {"time": ch_t, "temp": ch_T}
-                ch_labels[ch_name] = sensor
-                found_any = True
-            else:
-                data_dict[ch_name] = {"time": np.array([]), "temp": np.array([])}
+                data_dict = {"BlockRef": {"time": br_t, "temp": br_T}}
+                ch_labels = {}
+                ch_names = ["Ch0", "Ch1", "Ch2", "Ch3"]
 
-        if found_any:
-            return data_dict, "sense_multi", ch_labels, warnings
+                for idx, prefix in enumerate(sensor_prefixes[:4]):
+                    ch_name = ch_names[idx]
+                    g = valid[prefix]
+                    ch_t, ch_T = _drop_nans(
+                        _to_float64(df[g["time_col"]]),
+                        _to_float64(df[g["temp_col"]]),
+                        prefix, warnings,
+                    )
+                    data_dict[ch_name] = {"time": ch_t, "temp": ch_T}
+                    ch_labels[ch_name] = prefix
+
+                for ch_name in ch_names[len(sensor_prefixes):]:
+                    data_dict[ch_name] = {"time": np.array([]), "temp": np.array([])}
+
+                return data_dict, "sense_multi", ch_labels, warnings
 
     raise ValueError(
-        "Could not detect CSV format. Expected one of:\n"
-        "  • Single time column + Ch0, Ch1, Ch2, Ch3, BlockRef\n"
-        "  • Per-sensor columns: A1_Timestamp, A1_Temp, A2_…, B1_…, B2_…, BlockRef_Timestamp, BlockRef_Temp"
+        "Could not detect CSV format. Supported formats:\n"
+        "  • Single shared time column with Ch0, Ch1, Ch2, Ch3, BlockRef columns\n"
+        "  • Per-channel columns where each channel has a timestamp and temperature column\n"
+        "    (e.g. Ch0_Time + Ch0_Temp, BlockRef_Time + BlockRef_Temp).\n"
+        "    BlockRef is identified by its name containing 'block', or by having no TagID: entries in its annotation column."
     )
 
 
@@ -320,9 +324,98 @@ PLOT_LAYOUT = dict(
 )
 
 # ----------------------------
+# Sidebar (always visible)
+# ----------------------------
+def _inline(label):
+    """Render a right-aligned label for use beside a collapsed number_input."""
+    st.markdown(
+        f"<p style='margin:0;padding-top:8px;font-size:14px'>{label}</p>",
+        unsafe_allow_html=True,
+    )
+
+with st.sidebar:
+    if os.path.exists("logo.png"):
+        st.image("logo.png", use_container_width=True)
+    st.header("Parameters")
+
+    st.markdown("#### Zeroing window")
+    _l, _r = st.columns([1.4, 1.6])
+    with _l: _inline("Start (s)")
+    z0 = _r.number_input("Start (s)", value=0.0, step=10.0, label_visibility="collapsed")
+    _l, _r = st.columns([1.4, 1.6])
+    with _l: _inline("End (s)")
+    z1 = _r.number_input("End (s)", value=100.0, step=10.0, label_visibility="collapsed")
+    zero_range = (float(z0), float(z1))
+
+    st.divider()
+
+    st.markdown("#### Sample volume")
+    _l, _r = st.columns([1.4, 1.6])
+    with _l: _inline("Volume (mL)")
+    V = _r.number_input("Volume (mL)", value=1.0, step=0.5, min_value=0.0, label_visibility="collapsed")
+
+    C_calc = 3.2 + 5.5 * float(V)
+    K_calc = 0.025 + 0.007 * float(V)
+
+    c1, c2 = st.columns(2)
+    c1.metric("C (J/K)", f"{C_calc:.3f}")
+    c2.metric("K (W/K)", f"{K_calc:.4f}")
+
+    use_override = st.checkbox("Override C / K", value=False)
+    if use_override:
+        _l, _r = st.columns([1.4, 1.6])
+        with _l: _inline("C (J/K)")
+        C = _r.number_input("C (J/K)", value=float(C_calc), step=0.1, label_visibility="collapsed")
+        _l, _r = st.columns([1.4, 1.6])
+        with _l: _inline("K (W/K)")
+        K = _r.number_input("K (W/K)", value=float(K_calc), step=0.001, format="%.6f", label_visibility="collapsed")
+    else:
+        C, K = float(C_calc), float(K_calc)
+
+    st.divider()
+
+    st.markdown("#### Analysis window")
+    use_time_mask = st.checkbox("Limit time range", value=False)
+    if use_time_mask:
+        _l, _r = st.columns([1.4, 1.6])
+        with _l: _inline("Start (s)")
+        t_min = _r.number_input("t_min", value=0.0, step=10.0, label_visibility="collapsed")
+        _l, _r = st.columns([1.4, 1.6])
+        with _l: _inline("End (s)")
+        t_max = _r.number_input("t_max", value=3000.0, step=10.0, label_visibility="collapsed")
+        time_range = (float(t_min), float(t_max))
+    else:
+        time_range = None
+
+    st.divider()
+
+    st.markdown("#### Power smoothing")
+    gauss_weight = st.slider("Gaussian width", min_value=0.01, max_value=1.0, value=0.1, step=0.01,
+                             help="Gaussian smoothing width before differentiation. Higher = smoother.")
+    tv_weight = st.slider("TV weight", min_value=0.01, max_value=10.0, value=0.3, step=0.05,
+                          help="Total Variation regularization strength. Higher = smoother/more piecewise-constant.")
+
+# ----------------------------
 # UI
 # ----------------------------
 st.title("SENSE Energy Analysis")
+
+st.markdown("""
+<style>
+  [data-testid="stFileUploaderDropzone"] {
+      border: 2px dashed #94a3b8 !important;
+      border-radius: 10px !important;
+      min-height: 80px !important;
+      transition: background 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
+  }
+  [data-testid="stFileUploaderDropzone"]:hover {
+      background-color: #eff6ff !important;
+      border-color: #2563eb !important;
+      border-width: 3px !important;
+      box-shadow: 0 0 0 4px rgba(37,99,235,0.2) !important;
+  }
+</style>
+""", unsafe_allow_html=True)
 
 uploaded = st.file_uploader("Upload CSV", type=["csv"], label_visibility="collapsed")
 
@@ -339,8 +432,6 @@ except Exception as e:
     st.error(str(e))
     st.stop()
 
-for w in schema_warnings:
-    st.warning(w)
 
 # Temperature plot (full width)
 st.subheader("Temperature traces")
@@ -373,55 +464,6 @@ fig1.update_layout(**PLOT_LAYOUT,
 st.plotly_chart(fig1, use_container_width=True)
 
 st.divider()
-
-# ----------------------------
-# Sidebar parameters
-# ----------------------------
-with st.sidebar:
-    st.header("Parameters")
-
-    st.markdown("##### Zeroing window")
-    z0 = st.number_input("Start (s)", value=0.0, step=10.0)
-    z1 = st.number_input("End (s)", value=100.0, step=10.0)
-    zero_range = (float(z0), float(z1))
-
-    st.divider()
-
-    st.markdown("##### Sample volume")
-    V = st.number_input("Volume (mL)", value=1.0, step=0.5, min_value=0.0)
-
-    C_calc = 3.2 + 5.5 * float(V)
-    K_calc = 0.025 + 0.007 * float(V)
-
-    c1, c2 = st.columns(2)
-    c1.metric("C (J/K)", f"{C_calc:.3f}")
-    c2.metric("K (W/K)", f"{K_calc:.4f}")
-
-    use_override = st.checkbox("Override C / K", value=False)
-    if use_override:
-        C = st.number_input("C (J/K)", value=float(C_calc), step=0.1)
-        K = st.number_input("K (W/K)", value=float(K_calc), step=0.001, format="%.6f")
-    else:
-        C, K = float(C_calc), float(K_calc)
-
-    st.divider()
-
-    st.markdown("##### Analysis window")
-    use_time_mask = st.checkbox("Limit time range", value=False)
-    if use_time_mask:
-        t_min = st.number_input("Start (s)", value=0.0, step=10.0, key="t_min")
-        t_max = st.number_input("End (s)", value=3000.0, step=10.0, key="t_max")
-        time_range = (float(t_min), float(t_max))
-    else:
-        time_range = None
-
-    st.divider()
-
-    st.markdown("##### Power smoothing")
-    gauss_weight = st.slider("Gaussian width", min_value=0.01, max_value=1.0, value=0.1, step=0.01,
-                             help="Gaussian smoothing width before differentiation. Higher = smoother.")
-    tv_weight = st.slider("TV weight", min_value=0.01, max_value=2.0, value=0.3, step=0.01,
-                          help="Total Variation regularization strength. Matches the notebook's weight=0.3.")
 
 
 # ----------------------------
