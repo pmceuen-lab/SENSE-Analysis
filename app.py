@@ -72,8 +72,8 @@ def mask_time_range(time, data, t_min, t_max):
     return time[mask], data[mask]
 
 
-def smooth_derivative(x, y, weight=0.1):
-    """Gaussian-smooth y then differentiate. weight controls width (higher = smoother)."""
+def _gaussian_smooth(y, weight):
+    """Gaussian-smooth a signal. weight controls width (higher = smoother)."""
     y = np.asarray(y, dtype=float)
     n = len(y)
     sigma = max(1.0, weight * n / 10.0)
@@ -81,14 +81,15 @@ def smooth_derivative(x, y, weight=0.1):
     kernel = np.exp(-0.5 * (np.arange(-radius, radius + 1) / sigma) ** 2)
     kernel /= kernel.sum()
     y_padded = np.pad(y, radius, mode='reflect')
-    y_smooth = np.convolve(y_padded, kernel, mode='valid')[:n]
-    return np.gradient(y_smooth, x)
+    return np.convolve(y_padded, kernel, mode='valid')[:n]
 
 
-def tv_derivative(x, y, weight=0.3):
+def compute_power(x, y, tv_weight=0.3, gauss_weight=0.1):
+    """Differentiate energy → TV denoise → Gaussian smooth."""
     y = np.asarray(y, dtype=float)
     dy = np.gradient(y, x)
-    return denoise_tv_chambolle(dy, weight=weight)
+    dy_tv = denoise_tv_chambolle(dy, weight=tv_weight)
+    return _gaussian_smooth(dy_tv, gauss_weight)
 
 
 def analyze(data_dict, C, K, zero_range, ch_labels=None, time_range=None,
@@ -158,15 +159,13 @@ def analyze(data_dict, C, K, zero_range, ch_labels=None, time_range=None,
             T_zerod_masked, t_masked, block_temp_masked, C, K, T0avg
         )
 
-        power_gauss = smooth_derivative(t_masked, energy, weight=gauss_weight)
-        power_tv    = tv_derivative(t_masked, energy, weight=tv_weight)
+        power = compute_power(t_masked, energy, tv_weight=tv_weight, gauss_weight=gauss_weight)
 
         label = ch_labels.get(ch_name, ch_name) if ch_labels else ch_name
         plots.append({
             'x': t_masked,
             'y': energy,
-            'power_gauss': power_gauss,
-            'power_tv':    power_tv,
+            'power': power,
             'label': label,
         })
 
@@ -491,14 +490,9 @@ st.subheader("Power traces")
 fig3 = go.Figure()
 
 for i, p in enumerate(results["plots"]):
-    color = PALETTE[i % len(PALETTE)]
     fig3.add_trace(go.Scatter(
-        x=p["x"], y=p["power_gauss"], name=f"{p['label']} (Gaussian)",
-        line=dict(color=color, width=2),
-    ))
-    fig3.add_trace(go.Scatter(
-        x=p["x"], y=p["power_tv"], name=f"{p['label']} (TV)",
-        line=dict(color=color, width=1.5, dash="dash"),
+        x=p["x"], y=p["power"], name=p["label"],
+        line=dict(color=PALETTE[i % len(PALETTE)], width=2),
     ))
 
 fig3.update_layout(**PLOT_LAYOUT,
@@ -532,9 +526,8 @@ st.divider()
 # Export
 out = pd.DataFrame({"Time (s)": results["plots"][0]["x"]})
 for p in results["plots"]:
-    out[p["label"] + "_Energy (J)"]      = p["y"]
-    out[p["label"] + "_Power_Gauss (W)"] = p["power_gauss"]
-    out[p["label"] + "_Power_TV (W)"]    = p["power_tv"]
+    out[p["label"] + "_Energy (J)"] = p["y"]
+    out[p["label"] + "_Power (W)"]  = p["power"]
 
 csv_bytes = out.to_csv(index=False).encode("utf-8")
 st.download_button(
