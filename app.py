@@ -87,8 +87,8 @@ def smooth_derivative(x, y, weight=0.1):
 
 def tv_derivative(x, y, weight=0.3):
     y = np.asarray(y, dtype=float)
-    y_tv = denoise_tv_chambolle(y, weight=weight)
-    return np.gradient(y_tv, x)
+    dy = np.gradient(y, x)
+    return denoise_tv_chambolle(dy, weight=weight)
 
 
 def analyze(data_dict, C, K, zero_range, ch_labels=None, time_range=None,
@@ -357,9 +357,7 @@ with st.sidebar:
     C_calc = 3.2 + 5.5 * float(V)
     K_calc = 0.025 + 0.007 * float(V)
 
-    c1, c2 = st.columns(2)
-    c1.metric("C (J/K)", f"{C_calc:.3f}")
-    c2.metric("K (W/K)", f"{K_calc:.4f}")
+    _ck_placeholder = st.empty()
 
     use_override = st.checkbox("Override C / K", value=False)
     if use_override:
@@ -371,6 +369,11 @@ with st.sidebar:
         K = _r.number_input("K (W/K)", value=float(K_calc), step=0.001, format="%.6f", label_visibility="collapsed")
     else:
         C, K = float(C_calc), float(K_calc)
+
+    with _ck_placeholder.container():
+        c1, c2 = st.columns(2)
+        c1.metric("C (J/K)", f"{C:.3f}")
+        c2.metric("K (W/K)", f"{K:.4f}")
 
     st.divider()
 
@@ -441,21 +444,28 @@ if schema == "standard":
     t = data_dict["BlockRef"]["time"]
     for i, ch_name in enumerate(["Ch0", "Ch1", "Ch2", "Ch3", "BlockRef"]):
         label = ch_labels.get(ch_name, ch_name) if ch_name != "BlockRef" else "BlockRef"
+        t_p, temp_p = mask_time_range(t, data_dict[ch_name]["temp"], *time_range) if time_range else (t, data_dict[ch_name]["temp"])
         fig1.add_trace(go.Scatter(
-            x=t, y=data_dict[ch_name]["temp"], name=label,
+            x=t_p, y=temp_p, name=label,
             line=dict(color=PALETTE[i % len(PALETTE)], width=1.8),
         ))
 else:
     i = 0
     for ch_name, sensor in ch_labels.items():
         if len(data_dict[ch_name]["time"]) > 0:
+            t_ch, temp_ch = data_dict[ch_name]["time"], data_dict[ch_name]["temp"]
+            if time_range:
+                t_ch, temp_ch = mask_time_range(t_ch, temp_ch, *time_range)
             fig1.add_trace(go.Scatter(
-                x=data_dict[ch_name]["time"], y=data_dict[ch_name]["temp"],
+                x=t_ch, y=temp_ch,
                 name=sensor, line=dict(color=PALETTE[i % len(PALETTE)], width=1.8),
             ))
             i += 1
+    br_t, br_T = data_dict["BlockRef"]["time"], data_dict["BlockRef"]["temp"]
+    if time_range:
+        br_t, br_T = mask_time_range(br_t, br_T, *time_range)
     fig1.add_trace(go.Scatter(
-        x=data_dict["BlockRef"]["time"], y=data_dict["BlockRef"]["temp"],
+        x=br_t, y=br_T,
         name="BlockRef", line=dict(color=PALETTE[i % len(PALETTE)], width=1.8, dash="dash"),
     ))
 
