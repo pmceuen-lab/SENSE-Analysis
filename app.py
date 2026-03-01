@@ -72,28 +72,31 @@ def mask_time_range(time, data, t_min, t_max):
     return time[mask], data[mask]
 
 
-def _gaussian_smooth(y, weight):
-    """Gaussian-smooth a signal. weight controls width in points (higher = smoother)."""
+def _gaussian_smooth(x, y, sigma_s):
+    """Gaussian-smooth y with sigma specified in seconds."""
     y = np.asarray(y, dtype=float)
     n = len(y)
-    sigma = max(1.0, weight * 20.0)
-    radius = min(int(4 * sigma), n // 2 - 1)
-    kernel = np.exp(-0.5 * (np.arange(-radius, radius + 1) / sigma) ** 2)
+    if n < 2:
+        return y
+    dt = np.mean(np.diff(x))
+    sigma_pts = max(1.0, sigma_s / dt)
+    radius = min(int(4 * sigma_pts), n // 2 - 1)
+    kernel = np.exp(-0.5 * (np.arange(-radius, radius + 1) / sigma_pts) ** 2)
     kernel /= kernel.sum()
     y_padded = np.pad(y, radius, mode='reflect')
     return np.convolve(y_padded, kernel, mode='valid')[:n]
 
 
-def compute_power(x, y, tv_weight=0.3, gauss_weight=0.1):
+def compute_power(x, y, tv_weight=0.3, gauss_sigma=10.0):
     """Differentiate energy → TV denoise → Gaussian smooth."""
     y = np.asarray(y, dtype=float)
     dy = np.gradient(y, x)
     dy_tv = denoise_tv_chambolle(dy, weight=tv_weight)
-    return _gaussian_smooth(dy_tv, gauss_weight)
+    return _gaussian_smooth(x, dy_tv, gauss_sigma)
 
 
 def analyze(data_dict, C, K, zero_range, ch_labels=None, time_range=None,
-            gauss_weight=0.1, tv_weight=0.3, return_data=False):
+            gauss_sigma=10.0, tv_weight=0.3, return_data=False):
     tzeroing = zero_range
 
     if 'BlockRef' not in data_dict:
@@ -159,7 +162,7 @@ def analyze(data_dict, C, K, zero_range, ch_labels=None, time_range=None,
             T_zerod_masked, t_masked, block_temp_masked, C, K, T0avg
         )
 
-        power = compute_power(t_masked, energy, tv_weight=tv_weight, gauss_weight=gauss_weight)
+        power = compute_power(t_masked, energy, tv_weight=tv_weight, gauss_sigma=gauss_sigma)
 
         label = ch_labels.get(ch_name, ch_name) if ch_labels else ch_name
         plots.append({
@@ -392,8 +395,8 @@ with st.sidebar:
     st.divider()
 
     st.markdown("#### Power smoothing")
-    gauss_weight = st.slider("Gaussian width", min_value=0.01, max_value=1.0, value=0.1, step=0.01,
-                             help="Gaussian smoothing width before differentiation. Higher = smoother.")
+    gauss_sigma = st.slider("Gaussian width (s)", min_value=0.0, max_value=500.0, value=10.0, step=1.0,
+                            help="Gaussian smoothing width in seconds applied after TV denoising. Higher = smoother.")
     tv_weight = st.slider("TV weight", min_value=0.01, max_value=10.0, value=0.3, step=0.05,
                           help="Total Variation regularization strength. Higher = smoother/more piecewise-constant.")
 
@@ -479,7 +482,7 @@ st.divider()
 # Run analysis
 # ----------------------------
 results = analyze(data_dict, C, K, zero_range, ch_labels=ch_labels,
-                  time_range=time_range, gauss_weight=gauss_weight, tv_weight=tv_weight)
+                  time_range=time_range, gauss_sigma=gauss_sigma, tv_weight=tv_weight)
 
 if not results["plots"]:
     st.warning("No channels with sufficient data to analyze.")
