@@ -73,10 +73,10 @@ def mask_time_range(time, data, t_min, t_max):
 
 
 def _gaussian_smooth(y, weight):
-    """Gaussian-smooth a signal. weight controls width (higher = smoother)."""
+    """Gaussian-smooth a signal. weight controls width in points (higher = smoother)."""
     y = np.asarray(y, dtype=float)
     n = len(y)
-    sigma = max(1.0, weight * n / 10.0)
+    sigma = max(1.0, weight * 20.0)
     radius = min(int(4 * sigma), n // 2 - 1)
     kernel = np.exp(-0.5 * (np.arange(-radius, radius + 1) / sigma) ** 2)
     kernel /= kernel.sum()
