@@ -472,47 +472,6 @@ except Exception as e:
     st.stop()
 
 
-# Temperature plot (full width)
-st.subheader("Temperature traces")
-fig1 = go.Figure()
-
-if schema == "standard":
-    t = data_dict["BlockRef"]["time"]
-    for i, ch_name in enumerate(["Ch0", "Ch1", "Ch2", "Ch3", "BlockRef"]):
-        label = ch_labels.get(ch_name, ch_name) if ch_name != "BlockRef" else "BlockRef"
-        t_p, temp_p = mask_time_range(t, data_dict[ch_name]["temp"], *time_range) if time_range else (t, data_dict[ch_name]["temp"])
-        fig1.add_trace(go.Scatter(
-            x=t_p, y=temp_p, name=label,
-            line=dict(color=PALETTE[i % len(PALETTE)], width=1.8),
-        ))
-else:
-    i = 0
-    for ch_name, sensor in ch_labels.items():
-        if len(data_dict[ch_name]["time"]) > 0:
-            t_ch, temp_ch = data_dict[ch_name]["time"], data_dict[ch_name]["temp"]
-            if time_range:
-                t_ch, temp_ch = mask_time_range(t_ch, temp_ch, *time_range)
-            fig1.add_trace(go.Scatter(
-                x=t_ch, y=temp_ch,
-                name=sensor, line=dict(color=PALETTE[i % len(PALETTE)], width=1.8),
-            ))
-            i += 1
-    br_t, br_T = data_dict["BlockRef"]["time"], data_dict["BlockRef"]["temp"]
-    if time_range:
-        br_t, br_T = mask_time_range(br_t, br_T, *time_range)
-    fig1.add_trace(go.Scatter(
-        x=br_t, y=br_T,
-        name="BlockRef", line=dict(color=PALETTE[i % len(PALETTE)], width=1.8, dash="dash"),
-    ))
-
-fig1.update_layout(**PLOT_LAYOUT,
-    xaxis_title="Time (s)", yaxis_title="Temperature (°C)", height=350,
-    uirevision="temp")
-st.plotly_chart(fig1, use_container_width=True)
-
-st.divider()
-
-
 # ----------------------------
 # Run analysis
 # ----------------------------
@@ -522,6 +481,27 @@ results = analyze(data_dict, C, K, zero_range, ch_labels=ch_labels,
 if not results["plots"]:
     st.warning("No channels with sufficient data to analyze.")
     st.stop()
+
+# Temperature plot
+st.subheader("Zeroed temperature traces")
+fig1 = go.Figure()
+for i, p in enumerate(results["plots"]):
+    fig1.add_trace(go.Scatter(
+        x=p["x"], y=p["temp"], name=p["label"],
+        line=dict(color=PALETTE[i % len(PALETTE)], width=1.8),
+    ))
+fig1.add_trace(go.Scatter(
+    x=results["plots"][0]["x"],
+    y=results["plots"][0]["block_temp"],
+    name="BlockRef",
+    line=dict(color="#888888", width=1.5, dash="dash"),
+))
+fig1.update_layout(**PLOT_LAYOUT,
+    xaxis_title="Time (s)", yaxis_title="Temperature (°C)", height=350,
+    uirevision="temp")
+st.plotly_chart(fig1, use_container_width=True)
+
+st.divider()
 
 # Heat plot
 st.subheader("Heat traces")
