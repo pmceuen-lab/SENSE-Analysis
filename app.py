@@ -3,10 +3,11 @@ import os
 import numpy as np
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 import plotly.graph_objects as go
 from skimage.restoration import denoise_tv_chambolle
 
-st.set_page_config(page_title="SENSE Energy Analysis", layout="wide")
+st.set_page_config(page_title="SENSE Analysis", layout="wide")
 
 st.markdown("""
 <style>
@@ -72,31 +73,28 @@ def mask_time_range(time, data, t_min, t_max):
     return time[mask], data[mask]
 
 
-def _gaussian_smooth(x, y, sigma_s):
-    """Gaussian-smooth y with sigma specified in seconds."""
-    y = np.asarray(y, dtype=float)
-    n = len(y)
-    if n < 2:
-        return y
-    dt = np.mean(np.diff(x))
-    sigma_pts = max(1.0, sigma_s / dt)
-    radius = min(int(4 * sigma_pts), n // 2 - 1)
-    kernel = np.exp(-0.5 * (np.arange(-radius, radius + 1) / sigma_pts) ** 2)
-    kernel /= kernel.sum()
-    y_padded = np.pad(y, radius, mode='reflect')
-    return np.convolve(y_padded, kernel, mode='valid')[:n]
+def _drop_close_points(t, *arrays, min_dt=0.3):
+    """Remove points where the gap from the previous kept point is < min_dt seconds."""
+    t = np.asarray(t, dtype=float)
+    keep = np.ones(len(t), dtype=bool)
+    last = t[0]
+    for i in range(1, len(t)):
+        if t[i] - last < min_dt:
+            keep[i] = False
+        else:
+            last = t[i]
+    return (t[keep],) + tuple(np.asarray(a)[keep] for a in arrays)
 
 
-def compute_power(x, y, tv_weight=0.3, gauss_sigma=10.0):
-    """Differentiate energy → TV denoise → Gaussian smooth."""
+def compute_power(x, y, tv_weight=0.3):
+    """Differentiate energy → TV denoise."""
     y = np.asarray(y, dtype=float)
     dy = np.gradient(y, x)
-    dy_tv = denoise_tv_chambolle(dy, weight=tv_weight)
-    return _gaussian_smooth(x, dy_tv, gauss_sigma)
+    return denoise_tv_chambolle(dy, weight=tv_weight)
 
 
 def analyze(data_dict, C, K, zero_range, ch_labels=None, time_range=None,
-            gauss_sigma=10.0, tv_weight=0.3, return_data=False):
+            tv_weight=0.3, return_data=False):
     tzeroing = zero_range
 
     if 'BlockRef' not in data_dict:
@@ -158,24 +156,28 @@ def analyze(data_dict, C, K, zero_range, ch_labels=None, time_range=None,
             t_masked, T_zerod_masked = block_time, T_zerod
             block_temp_masked = block_temp
 
+        # Drop points closer than 0.3 s to avoid gradient spikes
+        t_masked, T_zerod_masked, block_temp_masked = _drop_close_points(
+            t_masked, T_zerod_masked, block_temp_masked
+        )
+
         energy, cap_term, cond_term = calculate_energy(
             T_zerod_masked, t_masked, block_temp_masked, C, K, T0avg
         )
 
-        power = compute_power(t_masked, energy, tv_weight=tv_weight, gauss_sigma=gauss_sigma)
+        power = compute_power(t_masked, energy, tv_weight=tv_weight)
 
         label = ch_labels.get(ch_name, ch_name) if ch_labels else ch_name
         plots.append({
             'x': t_masked,
             'y': energy,
             'power': power,
+            'temp': T_zerod_masked,
+            'block_temp': block_temp_masked,
             'label': label,
         })
 
     results = {'plots': plots}
-
-    if return_data:
-        results["data"] = {}
 
     return results
 
@@ -340,23 +342,16 @@ with st.sidebar:
         st.image("logo.png", use_container_width=True)
     st.header("Parameters")
 
-    st.markdown("#### Zeroing window")
-    _l, _r = st.columns([1.4, 1.6])
-    with _l: _inline("Start (s)")
-    z0 = _r.number_input("Start (s)", value=0.0, step=10.0, label_visibility="collapsed")
-    _l, _r = st.columns([1.4, 1.6])
-    with _l: _inline("End (s)")
-    z1 = _r.number_input("End (s)", value=100.0, step=10.0, label_visibility="collapsed")
-    zero_range = (float(z0), float(z1))
-
-    st.divider()
-
-    st.markdown("#### Sample volume")
+    st.markdown("#### Sample parameters")
     _l, _r = st.columns([1.4, 1.6])
     with _l: _inline("Volume (mL)")
     V = _r.number_input("Volume (mL)", value=1.0, step=0.5, min_value=0.0, label_visibility="collapsed")
+    _l, _r = st.columns([1.4, 1.6])
+    with _l: _inline("C′ (J/mL·K)")
+    C_prime = _r.number_input("C_prime", value=4.18, step=0.1, min_value=0.0, label_visibility="collapsed",
+                               help="Heat capacity of the solvent (e.g. water ≈ 4.18 J/mL·K)")
 
-    C_calc = 3.2 + 5.5 * float(V)
+    C_calc = 3.2 + (float(C_prime) + 1.3) * float(V)
     K_calc = 0.025 + 0.007 * float(V)
 
     _ck_placeholder = st.empty()
@@ -374,8 +369,20 @@ with st.sidebar:
 
     with _ck_placeholder.container():
         c1, c2 = st.columns(2)
-        c1.metric("C (J/K)", f"{C:.3f}")
-        c2.metric("K (W/K)", f"{K:.4f}")
+        c1.metric("C (J/K)", f"{C:.3f}",
+                  help="C = 3.2 + (C′ + 1.3) × V")
+        c2.metric("K (W/K)", f"{K:.4f}",
+                  help="K = 0.025 + 0.007 × V")
+
+    st.divider()
+    st.markdown("#### Zeroing window")
+    _l, _r = st.columns([1.4, 1.6])
+    with _l: _inline("Zero start (s)")
+    z0 = _r.number_input("Start (s)", value=0.0, step=10.0, label_visibility="collapsed")
+    _l, _r = st.columns([1.4, 1.6])
+    with _l: _inline("Zero end (s)")
+    z1 = _r.number_input("End (s)", value=100.0, step=10.0, label_visibility="collapsed")
+    zero_range = (float(z0), float(z1))
 
     st.divider()
 
@@ -395,15 +402,13 @@ with st.sidebar:
     st.divider()
 
     st.markdown("#### Power smoothing")
-    gauss_sigma = st.slider("Gaussian width (s)", min_value=0.0, max_value=500.0, value=10.0, step=1.0,
-                            help="Gaussian smoothing width in seconds applied after TV denoising. Higher = smoother.")
-    tv_weight = st.slider("TV weight", min_value=0.01, max_value=10.0, value=0.3, step=0.05,
+    tv_weight = st.slider("TV weight", min_value=0.01, max_value=2.0, value=0.3, step=0.05,
                           help="Total Variation regularization strength. Higher = smoother/more piecewise-constant.")
 
 # ----------------------------
 # UI
 # ----------------------------
-st.title("SENSE Energy Analysis")
+st.title("SENSE Analysis")
 
 st.markdown("""
 <style>
@@ -413,16 +418,45 @@ st.markdown("""
       min-height: 80px !important;
       transition: background 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
   }
-  [data-testid="stFileUploaderDropzone"]:hover {
+  [data-testid="stFileUploaderDropzone"].drag-active {
       background-color: #eff6ff !important;
       border-color: #2563eb !important;
       border-width: 3px !important;
-      box-shadow: 0 0 0 4px rgba(37,99,235,0.2) !important;
+      box-shadow: 0 0 0 4px rgba(37,99,235,0.25) !important;
   }
 </style>
 """, unsafe_allow_html=True)
 
-uploaded = st.file_uploader("Upload CSV", type=["csv"], label_visibility="collapsed")
+# Inject JS drag-over highlighting via same-origin iframe trick
+components.html("""<script>
+(function() {
+  function attach() {
+    try {
+      var doc = window.parent.document;
+      doc.querySelectorAll('[data-testid="stFileUploaderDropzone"]').forEach(function(z) {
+        if (z._dl) return;
+        z._dl = true;
+        z.addEventListener('dragenter', function(e) { e.preventDefault(); z.classList.add('drag-active'); });
+        z.addEventListener('dragover',  function(e) { e.preventDefault(); z.classList.add('drag-active'); });
+        z.addEventListener('dragleave', function(e) {
+          if (!z.contains(e.relatedTarget)) z.classList.remove('drag-active');
+        });
+        z.addEventListener('drop', function() { z.classList.remove('drag-active'); });
+      });
+    } catch(e) {}
+  }
+  var n = 0;
+  (function loop() { attach(); if (++n < 20) setTimeout(loop, 400); })();
+  try {
+    new MutationObserver(attach).observe(window.parent.document.body, {childList:true, subtree:true});
+  } catch(e) {}
+})();
+</script>""", height=0)
+
+_up_col, _dl_col, _ = st.columns([2, 1, 2])
+with _up_col:
+    uploaded = st.file_uploader("Upload CSV", type=["csv"], label_visibility="collapsed")
+_dl_placeholder = _dl_col.empty()
 
 if not uploaded:
     st.info("Upload a CSV file to get started.")
@@ -472,7 +506,8 @@ else:
     ))
 
 fig1.update_layout(**PLOT_LAYOUT,
-    xaxis_title="Time (s)", yaxis_title="Temperature (°C)", height=350)
+    xaxis_title="Time (s)", yaxis_title="Temperature (°C)", height=350,
+    uirevision="temp")
 st.plotly_chart(fig1, use_container_width=True)
 
 st.divider()
@@ -482,13 +517,36 @@ st.divider()
 # Run analysis
 # ----------------------------
 results = analyze(data_dict, C, K, zero_range, ch_labels=ch_labels,
-                  time_range=time_range, gauss_sigma=gauss_sigma, tv_weight=tv_weight)
+                  time_range=time_range, tv_weight=tv_weight)
 
 if not results["plots"]:
     st.warning("No channels with sufficient data to analyze.")
     st.stop()
 
-# Power plot (top)
+# Heat plot
+st.subheader("Heat traces")
+fig2 = go.Figure()
+
+for i, p in enumerate(results["plots"]):
+    fig2.add_trace(go.Scatter(
+        x=p["x"], y=p["y"], name=p["label"],
+        line=dict(color=PALETTE[i % len(PALETTE)], width=2),
+    ))
+
+fig2.update_layout(**PLOT_LAYOUT,
+    xaxis_title="Time (s)", yaxis_title="Heat (J)", height=400,
+    uirevision="heat")
+st.plotly_chart(fig2, use_container_width=True)
+
+# Final heat metrics
+st.markdown("**Final heat values**")
+metric_cols = st.columns(len(results["plots"]))
+for col, p in zip(metric_cols, results["plots"]):
+    col.metric(p["label"], f"{p['y'][-1]:.3f} J")
+
+st.divider()
+
+# Power plot
 st.subheader("Power traces")
 fig3 = go.Figure()
 
@@ -499,43 +557,42 @@ for i, p in enumerate(results["plots"]):
     ))
 
 fig3.update_layout(**PLOT_LAYOUT,
-    xaxis_title="Time (s)", yaxis_title="Power (W)", height=400)
+    xaxis_title="Time (s)", yaxis_title="Power (W)", height=400,
+    uirevision="power")
 st.plotly_chart(fig3, use_container_width=True)
 
-st.divider()
-
-# Energy plot
-st.subheader("Energy traces")
-fig2 = go.Figure()
-
-for i, p in enumerate(results["plots"]):
-    fig2.add_trace(go.Scatter(
-        x=p["x"], y=p["y"], name=p["label"],
-        line=dict(color=PALETTE[i % len(PALETTE)], width=2),
-    ))
-
-fig2.update_layout(**PLOT_LAYOUT,
-    xaxis_title="Time (s)", yaxis_title="Energy (J)", height=400)
-st.plotly_chart(fig2, use_container_width=True)
-
-# Final energy metrics
-st.markdown("**Final energy values**")
-metric_cols = st.columns(len(results["plots"]))
-for col, p in zip(metric_cols, results["plots"]):
-    col.metric(p["label"], f"{p['y'][-1]:.3f} J")
-
-st.divider()
-
 # Export
-out = pd.DataFrame({"Time (s)": results["plots"][0]["x"]})
+out = pd.DataFrame({
+    "Time (s)":        results["plots"][0]["x"],
+    "BlockRef_Temp (°C)": results["plots"][0]["block_temp"],
+})
 for p in results["plots"]:
-    out[p["label"] + "_Energy (J)"] = p["y"]
+    out[p["label"] + "_Temp (°C)"]  = p["temp"]
+    out[p["label"] + "_Heat (J)"]   = p["y"]
     out[p["label"] + "_Power (W)"]  = p["power"]
 
-csv_bytes = out.to_csv(index=False).encode("utf-8")
-st.download_button(
-    "Download results (CSV)",
-    data=csv_bytes,
-    file_name="energy_traces.csv",
-    mime="text/csv",
+analysis_window = (
+    f"{time_range[0]:.1f} - {time_range[1]:.1f} s" if time_range else "full range"
 )
+param_header = "\n".join([
+    f"# Source file,{uploaded.name}",
+    f"# C (J/K),{C:.4f}",
+    f"# K (W/K),{K:.6f}",
+    f"# C' (J/mL·K),{float(C_prime):.4f}",
+    f"# Volume (mL),{float(V):.4f}",
+    f"# Zero start (s),{zero_range[0]:.1f}",
+    f"# Zero end (s),{zero_range[1]:.1f}",
+    f"# Analysis window,{analysis_window}",
+    f"# TV weight,{tv_weight:.3f}",
+]) + "\n"
+csv_bytes = (param_header + out.to_csv(index=False)).encode("utf-8")
+export_name = uploaded.name.rsplit(".", 1)[0] + "_analysis.csv"
+with _dl_placeholder.container():
+    st.markdown("<div style='padding-top:1.6rem'></div>", unsafe_allow_html=True)
+    st.download_button(
+        "Download results (CSV)",
+        data=csv_bytes,
+        file_name=export_name,
+        mime="text/csv",
+        use_container_width=True,
+    )
