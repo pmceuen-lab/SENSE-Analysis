@@ -62,7 +62,7 @@ def calculate_energy(T_data, time_data, T_block_data, C, K, T0, alpha_env=0.0, T
     K_int = np.cumsum((T_data[1:] - T_block_data[1:]) * dt)
     K_int = np.concatenate(([0], K_int))
 
-    Ke_int = np.cumsum((T_data[1:] - Te) * dt)
+    Ke_int = np.cumsum((T_data[1:] - T0) * dt)
     Ke_int = np.concatenate(([0], Ke_int))
 
     C_int = T_data - T0
@@ -431,7 +431,7 @@ with st.sidebar:
             "<p style='margin:0;padding-top:8px;font-size:14px'>α(env) "
             "<span title='Environment loss fraction: α = Ke / (Ke + Kb)."
             " K is split into Kb = (1−α)·K (loss to block) and Ke = α·K (loss to environment)."
-            " Adds Ke·∫(T − Te) dt to the energy, where Te = 23 °C."
+            " Adds Ke·∫(T − T₀) dt to the energy (zeroed at baseline)."
             " Default α = 0 disables this correction.' "
             "style='cursor:help;color:#fff;background:#aab;border-radius:50%;"
             "width:15px;height:15px;display:inline-flex;align-items:center;"
