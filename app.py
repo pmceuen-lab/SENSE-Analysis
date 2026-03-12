@@ -54,15 +54,20 @@ def resample_temperature(T_sample, T_ref, time_sample, time_ref):
     return np.interp(time_ref, time_sample, T_sample)
 
 
-def calculate_energy(T_data, time_data, T_block_data, C, K, T0):
+def calculate_energy(T_data, time_data, T_block_data, C, K, T0, alpha_env=0.0, Te=23.0):
     dt = np.diff(time_data)
+    Kb = (1.0 - alpha_env) * K
+    Ke = alpha_env * K
 
     K_int = np.cumsum((T_data[1:] - T_block_data[1:]) * dt)
     K_int = np.concatenate(([0], K_int))
 
+    Ke_int = np.cumsum((T_data[1:] - Te) * dt)
+    Ke_int = np.concatenate(([0], Ke_int))
+
     C_int = T_data - T0
 
-    U = C * C_int + K * K_int
+    U = C * C_int + Kb * K_int + Ke * Ke_int
 
     return U, C_int, K_int
 
@@ -102,7 +107,7 @@ def compute_power(x, y, tv_weight=0.3, gauss_sigma=None):
 
 def analyze(data_dict, C, K, zero_range, ch_labels=None, time_range=None,
             tv_weight=0.3, final_zero_range=None, selected_channels=None,
-            gauss_sigma=None):
+            gauss_sigma=None, alpha_env=0.0, Te=23.0):
     tzeroing = zero_range
 
     if 'BlockRef' not in data_dict:
@@ -196,7 +201,8 @@ def analyze(data_dict, C, K, zero_range, ch_labels=None, time_range=None,
         )
 
         energy, cap_term, cond_term = calculate_energy(
-            T_zerod_masked, t_masked, block_temp_masked, C, K, T0avg
+            T_zerod_masked, t_masked, block_temp_masked, C, K, T0avg,
+            alpha_env=alpha_env, Te=Te,
         )
 
         power = compute_power(t_masked, energy, tv_weight=tv_weight,
@@ -418,6 +424,25 @@ with st.sidebar:
     with _l: _inline("C′ (J/mL·K)")
     C_prime = _r.number_input("C_prime", value=4.18, step=0.1, min_value=0.0, label_visibility="collapsed",
                                help="Heat capacity of the solvent (e.g. water ≈ 4.18 J/mL·K)")
+
+    _l, _r = st.columns([1.4, 1.6])
+    with _l:
+        st.markdown(
+            "<p style='margin:0;padding-top:8px;font-size:14px'>α(env) "
+            "<span title='Environment loss fraction: α = Ke / (Ke + Kb)."
+            " K is split into Kb = (1−α)·K (loss to block) and Ke = α·K (loss to environment)."
+            " Adds Ke·∫(T − Te) dt to the energy, where Te = 23 °C."
+            " Default α = 0 disables this correction.' "
+            "style='cursor:help;color:#fff;background:#aab;border-radius:50%;"
+            "width:15px;height:15px;display:inline-flex;align-items:center;"
+            "justify-content:center;font-size:10px;vertical-align:middle;"
+            "margin-left:2px;flex-shrink:0'>?</span></p>",
+            unsafe_allow_html=True,
+        )
+    alpha_env = _r.number_input(
+        "alpha_env", value=0.0, step=0.01, min_value=0.0, max_value=1.0,
+        label_visibility="collapsed",
+    )
 
     C_calc = 3.2 + (float(C_prime) + 1.3) * float(V)
     K_calc = 0.025 + 0.007 * float(V)
@@ -679,7 +704,8 @@ try:
                       time_range=time_range, tv_weight=tv_weight,
                       final_zero_range=final_zero_range,
                       selected_channels=selected_channels,
-                      gauss_sigma=gauss_sigma)
+                      gauss_sigma=gauss_sigma,
+                      alpha_env=float(alpha_env))
 except ValueError as e:
     st.error(str(e))
     st.stop()
@@ -774,6 +800,8 @@ param_header = "\n".join([
     f"# K (W/K),{K:.6f}",
     f"# C' (J/mL·K),{float(C_prime):.4f}",
     f"# Volume (mL),{float(V):.4f}",
+    f"# alpha(env),{float(alpha_env):.4f}",
+    f"# Te (C),23.0",
     f"# Zero start (s),{zero_range[0]:.1f}",
     f"# Zero end (s),{zero_range[1]:.1f}",
     f"# Analysis window,{analysis_window}",
