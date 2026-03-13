@@ -1,5 +1,6 @@
 # app.py
 import os
+import re
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -414,6 +415,11 @@ def _inline(label):
 with st.sidebar:
     if os.path.exists("logo.png"):
         st.image("logo.png", use_container_width=True)
+    row_plot_mode = st.checkbox("Row Plot", value=False,
+                                help="Group channels by row letter (A, B, C, D…) "
+                                     "and display each row in its own heat plot, "
+                                     "arranged in a 2×2 grid.")
+    st.divider()
     st.header("Parameters")
 
     st.markdown("#### Sample parameters")
@@ -714,71 +720,149 @@ if not results["plots"]:
     st.warning("No channels with sufficient data to analyze.")
     st.stop()
 
-# Temperature plot
 _trace_mode = "lines+markers" if show_points else "lines"
 _marker = dict(size=3) if show_points else {}
 
-st.subheader("Zeroed temperature traces")
-fig1 = go.Figure()
-for i, p in enumerate(results["plots"]):
+if row_plot_mode:
+    # --- Row Plot: group channels by leading letter(s) ---
+    _row_re = re.compile(r'^([A-Za-z]+)')
+    row_groups: dict = {}
+    for _orig_i, _p in enumerate(results["plots"]):
+        _m = _row_re.match(str(_p["label"]))
+        _key = _m.group(1).upper() if _m else _p["label"]
+        row_groups.setdefault(_key, []).append((_orig_i, _p))
+
+    _sorted_keys = sorted(row_groups.keys())
+    _block_x = results["plots"][0]["x"]
+    _block_y = results["plots"][0]["block_temp"]
+
+    # Temperature
+    st.subheader("Row plot — Temperature")
+    for _ri in range(0, len(_sorted_keys), 2):
+        _rcols = st.columns(2)
+        for _ci, _key in enumerate(_sorted_keys[_ri:_ri + 2]):
+            with _rcols[_ci]:
+                _fig = go.Figure()
+                for _oi, _p in row_groups[_key]:
+                    _fig.add_trace(go.Scatter(
+                        x=_p["x"], y=_p["temp"], name=_p["label"],
+                        mode=_trace_mode, marker=_marker,
+                        line=dict(color=PALETTE[_oi % len(PALETTE)], width=1.8),
+                    ))
+                _fig.add_trace(go.Scatter(
+                    x=_block_x, y=_block_y, name="BlockRef",
+                    mode=_trace_mode, marker=_marker,
+                    line=dict(color="#888888", width=1.5, dash="dash"),
+                ))
+                _fig.update_layout(**PLOT_LAYOUT,
+                    title=dict(text=f"Row {_key}", font=dict(size=14)),
+                    xaxis_title="Time (s)", yaxis_title="Temperature (°C)", height=320,
+                    uirevision=f"row_temp_{_key}")
+                st.plotly_chart(_fig, use_container_width=True)
+
+    st.divider()
+
+    # Heat
+    st.subheader("Row plot — Heat")
+    for _ri in range(0, len(_sorted_keys), 2):
+        _rcols = st.columns(2)
+        for _ci, _key in enumerate(_sorted_keys[_ri:_ri + 2]):
+            with _rcols[_ci]:
+                _fig = go.Figure()
+                for _oi, _p in row_groups[_key]:
+                    _fig.add_trace(go.Scatter(
+                        x=_p["x"], y=_p["y"], name=_p["label"],
+                        mode=_trace_mode, marker=_marker,
+                        line=dict(color=PALETTE[_oi % len(PALETTE)], width=2),
+                    ))
+                _fig.update_layout(**PLOT_LAYOUT,
+                    title=dict(text=f"Row {_key}", font=dict(size=14)),
+                    xaxis_title="Time (s)", yaxis_title="Heat (J)", height=320,
+                    uirevision=f"row_heat_{_key}")
+                st.plotly_chart(_fig, use_container_width=True)
+
+    st.markdown("**Final heat values**")
+    _metric_cols = st.columns(len(results["plots"]))
+    for _col, _p in zip(_metric_cols, results["plots"]):
+        _col.metric(_p["label"], f"{_p['y'][-1]:.3f} J")
+
+    st.divider()
+
+    # Power
+    st.subheader("Row plot — Power")
+    for _ri in range(0, len(_sorted_keys), 2):
+        _rcols = st.columns(2)
+        for _ci, _key in enumerate(_sorted_keys[_ri:_ri + 2]):
+            with _rcols[_ci]:
+                _fig = go.Figure()
+                for _oi, _p in row_groups[_key]:
+                    _fig.add_trace(go.Scatter(
+                        x=_p["x"], y=_p["power"], name=_p["label"],
+                        mode=_trace_mode, marker=_marker,
+                        line=dict(color=PALETTE[_oi % len(PALETTE)], width=2),
+                    ))
+                _fig.update_layout(**PLOT_LAYOUT,
+                    title=dict(text=f"Row {_key}", font=dict(size=14)),
+                    xaxis_title="Time (s)", yaxis_title="Power (W)", height=320,
+                    uirevision=f"row_power_{_key}")
+                st.plotly_chart(_fig, use_container_width=True)
+
+else:
+    # --- Standard plots ---
+    st.subheader("Zeroed temperature traces")
+    fig1 = go.Figure()
+    for i, p in enumerate(results["plots"]):
+        fig1.add_trace(go.Scatter(
+            x=p["x"], y=p["temp"], name=p["label"],
+            mode=_trace_mode, marker=_marker,
+            line=dict(color=PALETTE[i % len(PALETTE)], width=1.8),
+        ))
     fig1.add_trace(go.Scatter(
-        x=p["x"], y=p["temp"], name=p["label"],
+        x=results["plots"][0]["x"],
+        y=results["plots"][0]["block_temp"],
+        name="BlockRef",
         mode=_trace_mode, marker=_marker,
-        line=dict(color=PALETTE[i % len(PALETTE)], width=1.8),
+        line=dict(color="#888888", width=1.5, dash="dash"),
     ))
-fig1.add_trace(go.Scatter(
-    x=results["plots"][0]["x"],
-    y=results["plots"][0]["block_temp"],
-    name="BlockRef",
-    mode=_trace_mode, marker=_marker,
-    line=dict(color="#888888", width=1.5, dash="dash"),
-))
-fig1.update_layout(**PLOT_LAYOUT,
-    xaxis_title="Time (s)", yaxis_title="Temperature (°C)", height=350,
-    uirevision="temp")
-st.plotly_chart(fig1, use_container_width=True)
+    fig1.update_layout(**PLOT_LAYOUT,
+        xaxis_title="Time (s)", yaxis_title="Temperature (°C)", height=350,
+        uirevision="temp")
+    st.plotly_chart(fig1, use_container_width=True)
 
-st.divider()
+    st.divider()
 
-# Heat plot
-st.subheader("Heat traces")
-fig2 = go.Figure()
+    st.subheader("Heat traces")
+    fig2 = go.Figure()
+    for i, p in enumerate(results["plots"]):
+        fig2.add_trace(go.Scatter(
+            x=p["x"], y=p["y"], name=p["label"],
+            mode=_trace_mode, marker=_marker,
+            line=dict(color=PALETTE[i % len(PALETTE)], width=2),
+        ))
+    fig2.update_layout(**PLOT_LAYOUT,
+        xaxis_title="Time (s)", yaxis_title="Heat (J)", height=400,
+        uirevision="heat")
+    st.plotly_chart(fig2, use_container_width=True)
 
-for i, p in enumerate(results["plots"]):
-    fig2.add_trace(go.Scatter(
-        x=p["x"], y=p["y"], name=p["label"],
-        mode=_trace_mode, marker=_marker,
-        line=dict(color=PALETTE[i % len(PALETTE)], width=2),
-    ))
+    st.markdown("**Final heat values**")
+    metric_cols = st.columns(len(results["plots"]))
+    for col, p in zip(metric_cols, results["plots"]):
+        col.metric(p["label"], f"{p['y'][-1]:.3f} J")
 
-fig2.update_layout(**PLOT_LAYOUT,
-    xaxis_title="Time (s)", yaxis_title="Heat (J)", height=400,
-    uirevision="heat")
-st.plotly_chart(fig2, use_container_width=True)
+    st.divider()
 
-# Final heat metrics
-st.markdown("**Final heat values**")
-metric_cols = st.columns(len(results["plots"]))
-for col, p in zip(metric_cols, results["plots"]):
-    col.metric(p["label"], f"{p['y'][-1]:.3f} J")
-
-st.divider()
-
-# Power plot
-st.subheader("Power traces")
-fig3 = go.Figure()
-
-for i, p in enumerate(results["plots"]):
-    fig3.add_trace(go.Scatter(
-        x=p["x"], y=p["power"], name=p["label"],
-        mode=_trace_mode, marker=_marker,
-        line=dict(color=PALETTE[i % len(PALETTE)], width=2),
-    ))
-
-fig3.update_layout(**PLOT_LAYOUT,
-    xaxis_title="Time (s)", yaxis_title="Power (W)", height=400,
-    uirevision="power")
-st.plotly_chart(fig3, use_container_width=True)
+    st.subheader("Power traces")
+    fig3 = go.Figure()
+    for i, p in enumerate(results["plots"]):
+        fig3.add_trace(go.Scatter(
+            x=p["x"], y=p["power"], name=p["label"],
+            mode=_trace_mode, marker=_marker,
+            line=dict(color=PALETTE[i % len(PALETTE)], width=2),
+        ))
+    fig3.update_layout(**PLOT_LAYOUT,
+        xaxis_title="Time (s)", yaxis_title="Power (W)", height=400,
+        uirevision="power")
+    st.plotly_chart(fig3, use_container_width=True)
 
 # Export
 out = pd.DataFrame({
