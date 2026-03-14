@@ -6,6 +6,7 @@ import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 from skimage.restoration import denoise_tv_chambolle
 from scipy.ndimage import gaussian_filter1d
 
@@ -476,14 +477,17 @@ with st.sidebar:
         st.image("logo.png", use_container_width=True)
     _plot_view = st.radio(
         "Plot view",
-        options=["Standard", "Row Plot", "Column Plot"],
+        options=["All-in-one", "Array", "Row Plot", "Column Plot"],
         index=0,
         horizontal=False,
-        help="Row Plot: groups A–D each on one graph (2×2).\n"
-             "Column Plot: groups 1–6 each on one graph (3×2).",
+        help="All-in-one: all channels overlaid on one graph.\n"
+             "Array: each channel on its own plot in a well-plate grid.\n"
+             "Row Plot: one graph per row letter (A, B, C, D).\n"
+             "Column Plot: one graph per column number (1–6).",
     )
-    row_plot_mode = (_plot_view == "Row Plot")
+    row_plot_mode    = (_plot_view == "Row Plot")
     column_plot_mode = (_plot_view == "Column Plot")
+    array_plot_mode  = (_plot_view == "Array")
     st.divider()
     st.header("Parameters")
 
@@ -788,6 +792,14 @@ if not results["plots"]:
 _trace_mode = "lines+markers" if show_points else "lines"
 _marker = dict(size=3) if show_points else {}
 
+def _ds(x, y, n=600):
+    """Downsample x/y arrays to at most n points for browser rendering."""
+    x, y = np.asarray(x), np.asarray(y)
+    if len(x) <= n:
+        return x, y
+    idx = np.round(np.linspace(0, len(x) - 1, n)).astype(int)
+    return x[idx], y[idx]
+
 if column_plot_mode:
     # --- Column Plot: group channels by trailing digit(s) ---
     _col_re = re.compile(r'(\d+)$')
@@ -808,15 +820,16 @@ if column_plot_mode:
                 with _rcols[_ci]:
                     _fig = go.Figure()
                     for _oi, _p in col_groups[_key]:
-                        _y = _p[data_key]
+                        _dx, _dy = _ds(_p["x"], _p[data_key])
                         _fig.add_trace(go.Scatter(
-                            x=_p["x"], y=_y, name=_p["label"],
+                            x=_dx, y=_dy, name=_p["label"],
                             mode=_trace_mode, marker=_marker,
                             line=dict(color=PALETTE[_oi % len(PALETTE)], width=2),
                         ))
                     if data_key == "temp":
+                        _bx, _by = _ds(_block_x, _block_y)
                         _fig.add_trace(go.Scatter(
-                            x=_block_x, y=_block_y, name="BlockRef",
+                            x=_bx, y=_by, name="BlockRef",
                             mode=_trace_mode, marker=_marker,
                             line=dict(color="#888888", width=1.5, dash="dash"),
                         ))
@@ -857,13 +870,15 @@ elif row_plot_mode:
             with _rcols[_ci]:
                 _fig = go.Figure()
                 for _oi, _p in row_groups[_key]:
+                    _dx, _dy = _ds(_p["x"], _p["temp"])
                     _fig.add_trace(go.Scatter(
-                        x=_p["x"], y=_p["temp"], name=_p["label"],
+                        x=_dx, y=_dy, name=_p["label"],
                         mode=_trace_mode, marker=_marker,
                         line=dict(color=PALETTE[_oi % len(PALETTE)], width=1.8),
                     ))
+                _bx, _by = _ds(_block_x, _block_y)
                 _fig.add_trace(go.Scatter(
-                    x=_block_x, y=_block_y, name="BlockRef",
+                    x=_bx, y=_by, name="BlockRef",
                     mode=_trace_mode, marker=_marker,
                     line=dict(color="#888888", width=1.5, dash="dash"),
                 ))
@@ -883,8 +898,9 @@ elif row_plot_mode:
             with _rcols[_ci]:
                 _fig = go.Figure()
                 for _oi, _p in row_groups[_key]:
+                    _dx, _dy = _ds(_p["x"], _p["y"])
                     _fig.add_trace(go.Scatter(
-                        x=_p["x"], y=_p["y"], name=_p["label"],
+                        x=_dx, y=_dy, name=_p["label"],
                         mode=_trace_mode, marker=_marker,
                         line=dict(color=PALETTE[_oi % len(PALETTE)], width=2),
                     ))
@@ -906,8 +922,9 @@ elif row_plot_mode:
             with _rcols[_ci]:
                 _fig = go.Figure()
                 for _oi, _p in row_groups[_key]:
+                    _dx, _dy = _ds(_p["x"], _p["power"])
                     _fig.add_trace(go.Scatter(
-                        x=_p["x"], y=_p["power"], name=_p["label"],
+                        x=_dx, y=_dy, name=_p["label"],
                         mode=_trace_mode, marker=_marker,
                         line=dict(color=PALETTE[_oi % len(PALETTE)], width=2),
                     ))
@@ -917,19 +934,141 @@ elif row_plot_mode:
                     uirevision=f"row_power_{_key}")
                 st.plotly_chart(_fig, use_container_width=True)
 
+elif array_plot_mode:
+    # --- Array plot: each channel in its own subplot, well-plate grid ---
+    _arr_re = re.compile(r'^([A-Za-z]+)(\d+)$')
+    _arr_rows, _arr_cols, _arr_map, _arr_other = set(), set(), {}, []
+    for _orig_i, _p in enumerate(results["plots"]):
+        _m = _arr_re.match(str(_p["label"]))
+        if _m:
+            _r, _c = _m.group(1).upper(), int(_m.group(2))
+            _arr_rows.add(_r); _arr_cols.add(_c)
+            _arr_map[(_r, _c)] = (_orig_i, _p)
+        else:
+            _arr_other.append((_orig_i, _p))
+
+    _sorted_arr_rows = sorted(_arr_rows)   # A, B, C, D  → screen rows (down)
+    _sorted_arr_cols = sorted(_arr_cols)   # 1, 2, …, 6  → screen columns (across)
+    _n_scr_cols = max(len(_sorted_arr_cols), 1)
+    _block_x = results["plots"][0]["x"]
+    _block_y = results["plots"][0]["block_temp"]
+    _arr_layout = {**PLOT_LAYOUT,
+                   "margin": dict(l=45, r=8, t=28, b=28)}
+
+    def _arr_grid(data_key, ylabel, uiprefix, height_per_row=200):
+        n_r = len(_sorted_arr_rows)
+        n_c = len(_sorted_arr_cols)
+        if n_r == 0 or n_c == 0:
+            return
+        if _arr_axis_mode == "Scale individually":
+            shared_x, shared_y = False, False
+        elif _arr_axis_mode == "Common T range":
+            shared_x, shared_y = "columns", True
+        else:  # Shared (row Y, col X)
+            shared_x, shared_y = "columns", "rows"
+        titles = []
+        for _sr in _sorted_arr_rows:
+            for _sc in _sorted_arr_cols:
+                if (_sr, _sc) in _arr_map:
+                    titles.append(_arr_map[(_sr, _sc)][1]["label"])
+                else:
+                    titles.append("")
+        fig = make_subplots(
+            rows=n_r, cols=n_c,
+            shared_xaxes=shared_x,
+            shared_yaxes=shared_y,
+            subplot_titles=titles,
+            horizontal_spacing=0.02,
+            vertical_spacing=0.06,
+        )
+        for ri, _sr in enumerate(_sorted_arr_rows):
+            for ci, _sc in enumerate(_sorted_arr_cols):
+                if (_sr, _sc) in _arr_map:
+                    _oi, _p = _arr_map[(_sr, _sc)]
+                    _dx, _dy = _ds(_p["x"], _p[data_key])
+                    fig.add_trace(go.Scattergl(
+                        x=_dx, y=_dy,
+                        mode=_trace_mode, marker=_marker,
+                        line=dict(color=PALETTE[_oi % len(PALETTE)], width=2),
+                        showlegend=False,
+                    ), row=ri + 1, col=ci + 1)
+                    if data_key == "temp":
+                        _bx, _by = _ds(_block_x, _block_y)
+                        fig.add_trace(go.Scattergl(
+                            x=_bx, y=_by,
+                            mode=_trace_mode, marker=_marker,
+                            line=dict(color="#888888", width=1.2, dash="dash"),
+                            showlegend=False,
+                        ), row=ri + 1, col=ci + 1)
+        fig.update_layout(
+            paper_bgcolor=PLOT_LAYOUT["paper_bgcolor"],
+            plot_bgcolor=PLOT_LAYOUT["plot_bgcolor"],
+            font=PLOT_LAYOUT["font"],
+            showlegend=False,
+            height=max(n_r * height_per_row, 200),
+            margin=dict(l=50, r=10, t=40, b=30),
+            hovermode="x unified",
+            uirevision=uiprefix,
+        )
+        fig.update_xaxes(gridcolor="#eeeeee", linecolor="#cccccc", zerolinecolor="#cccccc")
+        fig.update_yaxes(gridcolor="#eeeeee", linecolor="#cccccc", zerolinecolor="#cccccc")
+        if _arr_axis_mode == "Common T range":
+            _all_y = [v for (_, _p) in _arr_map.values() for v in _p[data_key] if np.isfinite(v)]
+            if _all_y:
+                _pad = (max(_all_y) - min(_all_y)) * 0.05 or 0.5
+                fig.update_yaxes(range=[min(_all_y) - _pad, max(_all_y) + _pad])
+        st.plotly_chart(fig, use_container_width=True)
+        if _arr_other:
+            st.markdown("**Other channels**")
+            _oc = st.columns(min(len(_arr_other), 4))
+            for _ci2, (_oi2, _p2) in enumerate(_arr_other):
+                with _oc[_ci2 % 4]:
+                    _fig = go.Figure()
+                    _fig.add_trace(go.Scatter(
+                        x=_p2["x"], y=_p2[data_key],
+                        mode=_trace_mode, marker=_marker,
+                        line=dict(color=PALETTE[_oi2 % len(PALETTE)], width=2),
+                        showlegend=False,
+                    ))
+                    _fig.update_layout(**_arr_layout,
+                        title=dict(text=_p2["label"], font=dict(size=13)),
+                        xaxis_title="", yaxis_title=ylabel, height=200,
+                        uirevision=f"{uiprefix}_other{_ci2}")
+                    st.plotly_chart(_fig, use_container_width=True)
+
+    _arr_axis_mode = st.radio(
+        "Axis scaling",
+        options=["Shared (row Y, col X)", "Common T range", "Scale individually"],
+        index=0, horizontal=True,
+        help="Shared: Y shared within each row, X shared within each column.\n"
+             "Common T range: all panels share one Y-axis range.\n"
+             "Scale individually: each panel auto-scales independently.",
+    )
+
+    st.subheader("Array plot — Temperature")
+    _arr_grid("temp", "T (°C)", "arr_temp")
+    st.divider()
+    st.subheader("Array plot — Heat")
+    _arr_grid("y", "Heat (J)", "arr_heat")
+    _render_heat_table(results["plots"])
+    st.divider()
+    st.subheader("Array plot — Power")
+    _arr_grid("power", "P (W)", "arr_power")
+
 else:
-    # --- Standard plots ---
+    # --- All-in-one plots ---
     st.subheader("Zeroed temperature traces")
     fig1 = go.Figure()
     for i, p in enumerate(results["plots"]):
+        _dx, _dy = _ds(p["x"], p["temp"])
         fig1.add_trace(go.Scatter(
-            x=p["x"], y=p["temp"], name=p["label"],
+            x=_dx, y=_dy, name=p["label"],
             mode=_trace_mode, marker=_marker,
             line=dict(color=PALETTE[i % len(PALETTE)], width=1.8),
         ))
+    _bx, _by = _ds(results["plots"][0]["x"], results["plots"][0]["block_temp"])
     fig1.add_trace(go.Scatter(
-        x=results["plots"][0]["x"],
-        y=results["plots"][0]["block_temp"],
+        x=_bx, y=_by,
         name="BlockRef",
         mode=_trace_mode, marker=_marker,
         line=dict(color="#888888", width=1.5, dash="dash"),
@@ -944,8 +1083,9 @@ else:
     st.subheader("Heat traces")
     fig2 = go.Figure()
     for i, p in enumerate(results["plots"]):
+        _dx, _dy = _ds(p["x"], p["y"])
         fig2.add_trace(go.Scatter(
-            x=p["x"], y=p["y"], name=p["label"],
+            x=_dx, y=_dy, name=p["label"],
             mode=_trace_mode, marker=_marker,
             line=dict(color=PALETTE[i % len(PALETTE)], width=2),
         ))
@@ -961,8 +1101,9 @@ else:
     st.subheader("Power traces")
     fig3 = go.Figure()
     for i, p in enumerate(results["plots"]):
+        _dx, _dy = _ds(p["x"], p["power"])
         fig3.add_trace(go.Scatter(
-            x=p["x"], y=p["power"], name=p["label"],
+            x=_dx, y=_dy, name=p["label"],
             mode=_trace_mode, marker=_marker,
             line=dict(color=PALETTE[i % len(PALETTE)], width=2),
         ))
