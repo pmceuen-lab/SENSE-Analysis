@@ -403,6 +403,65 @@ PLOT_LAYOUT = dict(
 )
 
 # ----------------------------
+# Heat-table helper
+# ----------------------------
+_HEAT_TABLE_CSS = """
+<style>
+.ht-wrap table {
+    border-collapse: collapse;
+    width: 100%;
+    font-family: sans-serif;
+}
+.ht-wrap th, .ht-wrap td {
+    border: 1.5px solid #aaa;
+    padding: 6px 16px;
+    text-align: center;
+    font-size: 14px;
+}
+.ht-wrap th {
+    background: #f0f2f6;
+    font-size: 15px;
+    font-weight: 700;
+}
+.ht-wrap td {
+    font-size: 14px;
+}
+</style>
+"""
+
+def _render_heat_table(plots):
+    """Display final heat values as a row × column well-plate table."""
+    _rre = re.compile(r'^([A-Za-z]+)(\d+)$')
+    _grid, _rows, _cols, _other = {}, set(), set(), []
+    for _p in plots:
+        _m = _rre.match(str(_p["label"]))
+        if _m:
+            _r, _c = _m.group(1).upper(), int(_m.group(2))
+            _rows.add(_r); _cols.add(_c)
+            _grid[(_r, _c)] = _p["y"][-1]
+        else:
+            _other.append(_p)
+
+    st.markdown("**Final heat values (J)**")
+    if _rows:
+        _df = pd.DataFrame(index=sorted(_rows), columns=sorted(_cols), dtype=float)
+        _df.index.name = None
+        for (_r, _c), _v in _grid.items():
+            _df.loc[_r, _c] = _v
+        _html = _df.style.format("{:.1f}", na_rep="—").to_html()
+        st.markdown(_HEAT_TABLE_CSS + f"<div class='ht-wrap'>{_html}</div>",
+                    unsafe_allow_html=True)
+        if _other:
+            _oc = st.columns(len(_other))
+            for _col, _p in zip(_oc, _other):
+                _col.metric(_p["label"], f"{_p['y'][-1]:.1f} J")
+    else:
+        _mc = st.columns(len(plots))
+        for _col, _p in zip(_mc, plots):
+            _col.metric(_p["label"], f"{_p['y'][-1]:.1f} J")
+
+
+# ----------------------------
 # Sidebar (always visible)
 # ----------------------------
 def _inline(label):
@@ -772,10 +831,7 @@ if column_plot_mode:
     st.divider()
     st.subheader("Column plot — Heat")
     _col_grid("y", "Heat (J)", "col_heat")
-    st.markdown("**Final heat values**")
-    _metric_cols = st.columns(len(results["plots"]))
-    for _col, _p in zip(_metric_cols, results["plots"]):
-        _col.metric(_p["label"], f"{_p['y'][-1]:.3f} J")
+    _render_heat_table(results["plots"])
     st.divider()
     st.subheader("Column plot — Power")
     _col_grid("power", "Power (W)", "col_power")
@@ -838,10 +894,7 @@ elif row_plot_mode:
                     uirevision=f"row_heat_{_key}")
                 st.plotly_chart(_fig, use_container_width=True)
 
-    st.markdown("**Final heat values**")
-    _metric_cols = st.columns(len(results["plots"]))
-    for _col, _p in zip(_metric_cols, results["plots"]):
-        _col.metric(_p["label"], f"{_p['y'][-1]:.3f} J")
+    _render_heat_table(results["plots"])
 
     st.divider()
 
@@ -901,10 +954,7 @@ else:
         uirevision="heat")
     st.plotly_chart(fig2, use_container_width=True)
 
-    st.markdown("**Final heat values**")
-    metric_cols = st.columns(len(results["plots"]))
-    for col, p in zip(metric_cols, results["plots"]):
-        col.metric(p["label"], f"{p['y'][-1]:.3f} J")
+    _render_heat_table(results["plots"])
 
     st.divider()
 
