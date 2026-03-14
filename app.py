@@ -415,10 +415,16 @@ def _inline(label):
 with st.sidebar:
     if os.path.exists("logo.png"):
         st.image("logo.png", use_container_width=True)
-    row_plot_mode = st.checkbox("Row Plot", value=False,
-                                help="Group channels by row letter (A, B, C, D…) "
-                                     "and display each row in its own heat plot, "
-                                     "arranged in a 2×2 grid.")
+    _plot_view = st.radio(
+        "Plot view",
+        options=["Standard", "Row Plot", "Column Plot"],
+        index=0,
+        horizontal=False,
+        help="Row Plot: groups A–D each on one graph (2×2).\n"
+             "Column Plot: groups 1–6 each on one graph (3×2).",
+    )
+    row_plot_mode = (_plot_view == "Row Plot")
+    column_plot_mode = (_plot_view == "Column Plot")
     st.divider()
     st.header("Parameters")
 
@@ -723,7 +729,58 @@ if not results["plots"]:
 _trace_mode = "lines+markers" if show_points else "lines"
 _marker = dict(size=3) if show_points else {}
 
-if row_plot_mode:
+if column_plot_mode:
+    # --- Column Plot: group channels by trailing digit(s) ---
+    _col_re = re.compile(r'(\d+)$')
+    col_groups: dict = {}
+    for _orig_i, _p in enumerate(results["plots"]):
+        _m = _col_re.search(str(_p["label"]))
+        _key = _m.group(1) if _m else _p["label"]
+        col_groups.setdefault(_key, []).append((_orig_i, _p))
+
+    _sorted_col_keys = sorted(col_groups.keys(), key=lambda x: int(x) if x.isdigit() else x)
+    _block_x = results["plots"][0]["x"]
+    _block_y = results["plots"][0]["block_temp"]
+
+    def _col_grid(data_key, ylabel, uiprefix, height=320):
+        for _ri in range(0, len(_sorted_col_keys), 2):
+            _rcols = st.columns(2)
+            for _ci, _key in enumerate(_sorted_col_keys[_ri:_ri + 2]):
+                with _rcols[_ci]:
+                    _fig = go.Figure()
+                    for _oi, _p in col_groups[_key]:
+                        _y = _p[data_key]
+                        _fig.add_trace(go.Scatter(
+                            x=_p["x"], y=_y, name=_p["label"],
+                            mode=_trace_mode, marker=_marker,
+                            line=dict(color=PALETTE[_oi % len(PALETTE)], width=2),
+                        ))
+                    if data_key == "temp":
+                        _fig.add_trace(go.Scatter(
+                            x=_block_x, y=_block_y, name="BlockRef",
+                            mode=_trace_mode, marker=_marker,
+                            line=dict(color="#888888", width=1.5, dash="dash"),
+                        ))
+                    _fig.update_layout(**PLOT_LAYOUT,
+                        title=dict(text=f"Column {_key}", font=dict(size=14)),
+                        xaxis_title="Time (s)", yaxis_title=ylabel, height=height,
+                        uirevision=f"{uiprefix}_{_key}")
+                    st.plotly_chart(_fig, use_container_width=True)
+
+    st.subheader("Column plot — Temperature")
+    _col_grid("temp", "Temperature (°C)", "col_temp")
+    st.divider()
+    st.subheader("Column plot — Heat")
+    _col_grid("y", "Heat (J)", "col_heat")
+    st.markdown("**Final heat values**")
+    _metric_cols = st.columns(len(results["plots"]))
+    for _col, _p in zip(_metric_cols, results["plots"]):
+        _col.metric(_p["label"], f"{_p['y'][-1]:.3f} J")
+    st.divider()
+    st.subheader("Column plot — Power")
+    _col_grid("power", "Power (W)", "col_power")
+
+elif row_plot_mode:
     # --- Row Plot: group channels by leading letter(s) ---
     _row_re = re.compile(r'^([A-Za-z]+)')
     row_groups: dict = {}
