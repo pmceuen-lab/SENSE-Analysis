@@ -109,7 +109,7 @@ def compute_power(x, y, tv_weight=0.3, gauss_sigma=None):
 
 def analyze(data_dict, C, K, zero_range, ch_labels=None, time_range=None,
             tv_weight=0.3, final_zero_range=None, selected_channels=None,
-            gauss_sigma=None, alpha_env=0.0, Te=23.0):
+            gauss_sigma=None, temp_sigma=None, alpha_env=0.0, Te=23.0):
     tzeroing = zero_range
 
     if 'BlockRef' not in data_dict:
@@ -157,6 +157,10 @@ def analyze(data_dict, C, K, zero_range, ch_labels=None, time_range=None,
         ch_temp_resampled = resample_temperature(
             ch_temp_clean, block_temp, ch_time_clean, block_time
         )
+
+        if temp_sigma is not None and len(block_time) > 1:
+            dt = float(block_time[1] - block_time[0])
+            ch_temp_resampled = gaussian_filter1d(ch_temp_resampled, sigma=temp_sigma / dt)
 
         sumup = 0
         count = 0
@@ -477,17 +481,25 @@ with st.sidebar:
         st.image("logo.png", use_container_width=True)
     _plot_view = st.radio(
         "Plot view",
-        options=["All-in-one", "Array", "Row Plot", "Column Plot"],
+        options=["All-in-one", "Array", "Row", "Column"],
         index=0,
         horizontal=False,
         help="All-in-one: all channels overlaid on one graph.\n"
              "Array: each channel on its own plot in a well-plate grid.\n"
-             "Row Plot: one graph per row letter (A, B, C, D).\n"
-             "Column Plot: one graph per column number (1–6).",
+             "Row: one graph per row letter (A, B, C, D).\n"
+             "Column: one graph per column number (1–6).",
     )
-    row_plot_mode    = (_plot_view == "Row Plot")
-    column_plot_mode = (_plot_view == "Column Plot")
+    row_plot_mode    = (_plot_view == "Row")
+    column_plot_mode = (_plot_view == "Column")
     array_plot_mode  = (_plot_view == "Array")
+    st.divider()
+    st.markdown("#### Temperature smoothing")
+    _temp_smooth = st.toggle("Smooth T(t)", value=False)
+    if _temp_smooth:
+        temp_sigma = st.slider("σ (s)", min_value=0.5, max_value=30.0, value=2.0, step=0.5,
+                               help="Gaussian smoothing applied to raw temperature before analysis.")
+    else:
+        temp_sigma = None
     st.divider()
     st.header("Parameters")
 
@@ -780,6 +792,7 @@ try:
                       final_zero_range=final_zero_range,
                       selected_channels=selected_channels,
                       gauss_sigma=gauss_sigma,
+                      temp_sigma=temp_sigma,
                       alpha_env=float(alpha_env))
 except ValueError as e:
     st.error(str(e))
@@ -792,12 +805,40 @@ if not results["plots"]:
 _trace_mode = "lines+markers" if show_points else "lines"
 _marker = dict(size=3) if show_points else {}
 
-def _ds(x, y, n=600):
-    """Downsample x/y arrays to at most n points for browser rendering."""
-    x, y = np.asarray(x), np.asarray(y)
-    if len(x) <= n:
+def _ds(x, y, n=1800):
+    """Downsample x/y to at most n points using LTTB (Largest Triangle Three Buckets).
+    Preserves visual shape — peaks and inflections are kept, flat regions thinned."""
+    x, y = np.asarray(x, dtype=float), np.asarray(y, dtype=float)
+    length = len(x)
+    if length <= n:
         return x, y
-    idx = np.round(np.linspace(0, len(x) - 1, n)).astype(int)
+    # Always keep first and last point
+    selected = [0]
+    bucket_size = (length - 2) / (n - 2)
+    a = 0  # previously selected index
+    for i in range(n - 2):
+        # Next bucket boundaries
+        b_start = int((i + 1) * bucket_size) + 1
+        b_end   = int((i + 2) * bucket_size) + 1
+        b_end   = min(b_end, length - 1)
+        # Average of the bucket after this one (point C)
+        c_start = int((i + 2) * bucket_size) + 1
+        c_end   = min(int((i + 3) * bucket_size) + 1, length)
+        c_x = x[c_start:c_end].mean() if c_start < length else x[-1]
+        c_y = y[c_start:c_end].mean() if c_start < length else y[-1]
+        # Pick point in current bucket with largest triangle area vs A and C
+        if b_start >= b_end:
+            selected.append(b_start if b_start < length else length - 1)
+            continue
+        ax, ay = x[a], y[a]
+        area = 0.5 * np.abs(
+            (ax - c_x) * (y[b_start:b_end] - ay)
+            - (x[b_start:b_end] - ax) * (c_y - ay)
+        )
+        a = b_start + int(area.argmax())
+        selected.append(a)
+    selected.append(length - 1)
+    idx = np.array(selected)
     return x[idx], y[idx]
 
 if column_plot_mode:
