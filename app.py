@@ -107,6 +107,7 @@ def compute_power(x, y, tv_weight=0.3, gauss_sigma=None):
     return result
 
 
+@st.cache_data(show_spinner="Analysing…")
 def analyze(data_dict, C, K, zero_range, ch_labels=None, time_range=None,
             tv_weight=0.3, final_zero_range=None, selected_channels=None,
             gauss_sigma=None, temp_sigma=None, alpha_env=0.0, Te=23.0):
@@ -840,7 +841,7 @@ try:
     results = analyze(data_dict, C, K, zero_range, ch_labels=ch_labels,
                       time_range=time_range, tv_weight=tv_weight,
                       final_zero_range=final_zero_range,
-                      selected_channels=selected_channels,
+                      selected_channels=frozenset(selected_channels),
                       gauss_sigma=gauss_sigma,
                       temp_sigma=temp_sigma,
                       alpha_env=float(alpha_env))
