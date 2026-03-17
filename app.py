@@ -582,17 +582,17 @@ with st.sidebar:
     # Initialise zeroing inputs in session_state on first render so that
     # toggling the analysis window does not reset these values.
     if "z0" not in st.session_state:
-        st.session_state["z0"] = a_start
+        st.session_state["z0"] = 0.0
     if "z1" not in st.session_state:
-        st.session_state["z1"] = a_start + 50.0
+        st.session_state["z1"] = 100.0
 
     _l, _r = st.columns([1.4, 1.6])
     with _l: _inline("Zero start (s)")
     z0 = _r.number_input("Start (s)", key="z0", step=10.0, label_visibility="collapsed")
     _l, _r = st.columns([1.4, 1.6])
-    with _l: _inline("Zero end (s)")
-    z1 = _r.number_input("End (s)", key="z1", step=10.0, label_visibility="collapsed")
-    zero_range = (float(z0), float(z1))
+    with _l: _inline("Duration (s)")
+    z_dur = _r.number_input("Duration (s)", key="z1", min_value=1.0, step=10.0, label_visibility="collapsed")
+    zero_range = (float(z0), float(z0) + float(z_dur))
 
     use_final_zero = st.checkbox("Final zeroing window", value=False,
                                  help="Define a second zeroing window after the reaction. "
@@ -601,16 +601,16 @@ with st.sidebar:
         # Defaults: if analysis window is limited use its end; otherwise
         # anchor to the current zeroing end so values are within the data.
         if "fz0" not in st.session_state:
-            st.session_state["fz0"] = (a_end - 50.0) if use_time_mask else (float(z1) + 100.0)
+            st.session_state["fz0"] = (a_end - 100.0) if use_time_mask else (float(z0) + float(z_dur) + 100.0)
         if "fz1" not in st.session_state:
-            st.session_state["fz1"] = a_end if use_time_mask else (float(z1) + 200.0)
+            st.session_state["fz1"] = 100.0
         _l, _r = st.columns([1.4, 1.6])
         with _l: _inline("Final start (s)")
         fz0 = _r.number_input("Final start (s)", key="fz0", step=10.0, label_visibility="collapsed")
         _l, _r = st.columns([1.4, 1.6])
-        with _l: _inline("Final end (s)")
-        fz1 = _r.number_input("Final end (s)", key="fz1", step=10.0, label_visibility="collapsed")
-        final_zero_range = (float(fz0), float(fz1))
+        with _l: _inline("Duration (s)")
+        fz_dur = _r.number_input("Final duration (s)", key="fz1", min_value=1.0, step=10.0, label_visibility="collapsed")
+        final_zero_range = (float(fz0), float(fz0) + float(fz_dur))
     else:
         # Clear final-zero state so defaults recalculate if re-enabled
         st.session_state.pop("fz0", None)
@@ -744,26 +744,76 @@ if _show_sel:
         for _ch in _all_channels:
             st.session_state[f"chk_{_ch}"] = False
 
+    # Split channels into well-plate grid and others
+    _sel_re = re.compile(r'^([A-Za-z]+)(\d+)$')
+    _sel_grid = {}   # (row_letter, col_num) -> (orig_i, ch_key)
+    _sel_other = []  # (orig_i, ch_key) for non-matching channels
     for _i, _ch in enumerate(_all_channels):
-        _display = ch_labels.get(_ch, _ch)
-        _color = PALETTE[_i % len(PALETTE)]
-        # Re-initialise key from sel set if widget state was lost (e.g. view switch)
-        if f"chk_{_ch}" not in st.session_state:
-            st.session_state[f"chk_{_ch}"] = (_ch in st.session_state["sel"])
-        _sw_col, _cb_col = st.columns([0.06, 1])
-        with _sw_col:
-            st.markdown(
-                f"<div style='background:{_color};width:14px;height:14px;"
-                f"border-radius:3px;margin-top:10px'></div>",
-                unsafe_allow_html=True,
-            )
-        with _cb_col:
-            _val = st.checkbox(_display, key=f"chk_{_ch}")
-        # Keep sel set in sync
-        if _val:
-            st.session_state["sel"].add(_ch)
+        _m = _sel_re.match(ch_labels.get(_ch, _ch))
+        if _m:
+            _sel_grid[(_m.group(1).upper(), int(_m.group(2)))] = (_i, _ch)
         else:
-            st.session_state["sel"].discard(_ch)
+            _sel_other.append((_i, _ch))
+
+    if _sel_grid:
+        _sel_rows = sorted({r for r, _ in _sel_grid})
+        _sel_cols = sorted({c for _, c in _sel_grid})
+        # Column header row
+        _hcols = st.columns([0.4] + [1] * len(_sel_cols))
+        _hcols[0].markdown("")
+        for _ci, _cn in enumerate(_sel_cols):
+            _hcols[_ci + 1].markdown(
+                f"<div style='text-align:center;font-weight:600;font-size:13px'>{_cn}</div>",
+                unsafe_allow_html=True)
+        # One row per well-plate row
+        for _sr in _sel_rows:
+            _rcols = st.columns([0.4] + [1] * len(_sel_cols))
+            _rcols[0].markdown(
+                f"<div style='font-weight:600;font-size:14px;padding-top:6px'>{_sr}</div>",
+                unsafe_allow_html=True)
+            for _ci, _sc in enumerate(_sel_cols):
+                with _rcols[_ci + 1]:
+                    if (_sr, _sc) in _sel_grid:
+                        _i, _ch = _sel_grid[(_sr, _sc)]
+                        _display = ch_labels.get(_ch, _ch)
+                        _color = PALETTE[_i % len(PALETTE)]
+                        if f"chk_{_ch}" not in st.session_state:
+                            st.session_state[f"chk_{_ch}"] = (_ch in st.session_state["sel"])
+                        _sw_col, _cb_col = st.columns([0.18, 1])
+                        with _sw_col:
+                            st.markdown(
+                                f"<div style='background:{_color};width:12px;height:12px;"
+                                f"border-radius:2px;margin-top:10px'></div>",
+                                unsafe_allow_html=True)
+                        with _cb_col:
+                            _val = st.checkbox(_display, key=f"chk_{_ch}")
+                        if _val:
+                            st.session_state["sel"].add(_ch)
+                        else:
+                            st.session_state["sel"].discard(_ch)
+                    else:
+                        st.empty()
+
+    if _sel_other:
+        if _sel_grid:
+            st.markdown("**Other channels**")
+        for _i, _ch in _sel_other:
+            _display = ch_labels.get(_ch, _ch)
+            _color = PALETTE[_i % len(PALETTE)]
+            if f"chk_{_ch}" not in st.session_state:
+                st.session_state[f"chk_{_ch}"] = (_ch in st.session_state["sel"])
+            _sw_col, _cb_col = st.columns([0.06, 1])
+            with _sw_col:
+                st.markdown(
+                    f"<div style='background:{_color};width:14px;height:14px;"
+                    f"border-radius:3px;margin-top:10px'></div>",
+                    unsafe_allow_html=True)
+            with _cb_col:
+                _val = st.checkbox(_display, key=f"chk_{_ch}")
+            if _val:
+                st.session_state["sel"].add(_ch)
+            else:
+                st.session_state["sel"].discard(_ch)
     st.stop()
 
 selected_channels = st.session_state.get("sel", set(_all_channels))
@@ -1003,7 +1053,7 @@ elif array_plot_mode:
             return
         if _arr_axis_mode == "Scale individually":
             shared_x, shared_y = False, False
-        elif _arr_axis_mode == "Common T range":
+        elif _arr_axis_mode == "Common range":
             shared_x, shared_y = "columns", True
         else:  # Shared (row Y, col X)
             shared_x, shared_y = "columns", "rows"
@@ -1053,7 +1103,7 @@ elif array_plot_mode:
         )
         fig.update_xaxes(gridcolor="#eeeeee", linecolor="#cccccc", zerolinecolor="#cccccc")
         fig.update_yaxes(gridcolor="#eeeeee", linecolor="#cccccc", zerolinecolor="#cccccc")
-        if _arr_axis_mode == "Common T range":
+        if _arr_axis_mode == "Common range":
             _all_y = [v for (_, _p) in _arr_map.values() for v in _p[data_key] if np.isfinite(v)]
             if _all_y:
                 _pad = (max(_all_y) - min(_all_y)) * 0.05 or 0.5
@@ -1079,10 +1129,10 @@ elif array_plot_mode:
 
     _arr_axis_mode = st.radio(
         "Axis scaling",
-        options=["Shared (row Y, col X)", "Common T range", "Scale individually"],
+        options=["Common range", "Shared (row Y, col X)", "Scale individually"],
         index=0, horizontal=True,
-        help="Shared: Y shared within each row, X shared within each column.\n"
-             "Common T range: all panels share one Y-axis range.\n"
+        help="Common range: all panels share one Y-axis range.\n"
+             "Shared: Y shared within each row, X shared within each column.\n"
              "Scale individually: each panel auto-scales independently.",
     )
 
