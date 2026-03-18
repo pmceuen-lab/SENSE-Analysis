@@ -901,7 +901,7 @@ if column_plot_mode:
         _key = _m.group(1) if _m else _p["label"]
         col_groups.setdefault(_key, []).append((_orig_i, _p))
 
-    _sorted_col_keys = sorted(col_groups.keys(), key=lambda x: int(x) if x.isdigit() else x)
+    _sorted_col_keys = sorted(col_groups.keys(), key=lambda x: (0, int(x)) if x.isdigit() else (1, x))
     _block_x = results["plots"][0]["x"]
     _block_y = results["plots"][0]["block_temp"]
 
@@ -914,20 +914,20 @@ if column_plot_mode:
                     for _oi, _p in col_groups[_key]:
                         _dx, _dy = _ds(_p["x"], _p[data_key])
                         _fig.add_trace(go.Scatter(
-                            x=_dx, y=_dy, name=_p["label"],
+                            x=_dx / 60, y=_dy, name=_p["label"],
                             mode=_trace_mode, marker=_marker,
                             line=dict(color=PALETTE[_oi % len(PALETTE)], width=2),
                         ))
                     if data_key == "temp":
                         _bx, _by = _ds(_block_x, _block_y)
                         _fig.add_trace(go.Scatter(
-                            x=_bx, y=_by, name="BlockRef",
+                            x=_bx / 60, y=_by, name="BlockRef",
                             mode=_trace_mode, marker=_marker,
                             line=dict(color="#888888", width=1.5, dash="dash"),
                         ))
                     _fig.update_layout(**PLOT_LAYOUT,
                         title=dict(text=f"Column {_key}", font=dict(size=14)),
-                        xaxis_title="Time (s)", yaxis_title=ylabel, height=height,
+                        xaxis_title="Time (min)", yaxis_title=ylabel, height=height,
                         uirevision=f"{uiprefix}_{_key}")
                     st.plotly_chart(_fig, use_container_width=True)
 
@@ -964,19 +964,19 @@ elif row_plot_mode:
                 for _oi, _p in row_groups[_key]:
                     _dx, _dy = _ds(_p["x"], _p["temp"])
                     _fig.add_trace(go.Scatter(
-                        x=_dx, y=_dy, name=_p["label"],
+                        x=_dx / 60, y=_dy, name=_p["label"],
                         mode=_trace_mode, marker=_marker,
                         line=dict(color=PALETTE[_oi % len(PALETTE)], width=1.8),
                     ))
                 _bx, _by = _ds(_block_x, _block_y)
                 _fig.add_trace(go.Scatter(
-                    x=_bx, y=_by, name="BlockRef",
+                    x=_bx / 60, y=_by, name="BlockRef",
                     mode=_trace_mode, marker=_marker,
                     line=dict(color="#888888", width=1.5, dash="dash"),
                 ))
                 _fig.update_layout(**PLOT_LAYOUT,
                     title=dict(text=f"Row {_key}", font=dict(size=14)),
-                    xaxis_title="Time (s)", yaxis_title="Temperature (°C)", height=320,
+                    xaxis_title="Time (min)", yaxis_title="Temperature (°C)", height=320,
                     uirevision=f"row_temp_{_key}")
                 st.plotly_chart(_fig, use_container_width=True)
 
@@ -992,13 +992,13 @@ elif row_plot_mode:
                 for _oi, _p in row_groups[_key]:
                     _dx, _dy = _ds(_p["x"], _p["y"])
                     _fig.add_trace(go.Scatter(
-                        x=_dx, y=_dy, name=_p["label"],
+                        x=_dx / 60, y=_dy, name=_p["label"],
                         mode=_trace_mode, marker=_marker,
                         line=dict(color=PALETTE[_oi % len(PALETTE)], width=2),
                     ))
                 _fig.update_layout(**PLOT_LAYOUT,
                     title=dict(text=f"Row {_key}", font=dict(size=14)),
-                    xaxis_title="Time (s)", yaxis_title="Heat (J)", height=320,
+                    xaxis_title="Time (min)", yaxis_title="Heat (J)", height=320,
                     uirevision=f"row_heat_{_key}")
                 st.plotly_chart(_fig, use_container_width=True)
 
@@ -1016,13 +1016,13 @@ elif row_plot_mode:
                 for _oi, _p in row_groups[_key]:
                     _dx, _dy = _ds(_p["x"], _p["power"])
                     _fig.add_trace(go.Scatter(
-                        x=_dx, y=_dy, name=_p["label"],
+                        x=_dx / 60, y=_dy, name=_p["label"],
                         mode=_trace_mode, marker=_marker,
                         line=dict(color=PALETTE[_oi % len(PALETTE)], width=2),
                     ))
                 _fig.update_layout(**PLOT_LAYOUT,
                     title=dict(text=f"Row {_key}", font=dict(size=14)),
-                    xaxis_title="Time (s)", yaxis_title="Power (W)", height=320,
+                    xaxis_title="Time (min)", yaxis_title="Power (W)", height=320,
                     uirevision=f"row_power_{_key}")
                 st.plotly_chart(_fig, use_container_width=True)
 
@@ -1058,28 +1058,40 @@ elif array_plot_mode:
             shared_x, shared_y = "columns", True
         else:  # Shared (row Y, col X)
             shared_x, shared_y = "columns", "rows"
-        titles = []
-        for _sr in _sorted_arr_rows:
-            for _sc in _sorted_arr_cols:
-                if (_sr, _sc) in _arr_map:
-                    titles.append(_arr_map[(_sr, _sc)][1]["label"])
-                else:
-                    titles.append("")
+        _h_sp, _v_sp = 0.02, 0.06
         fig = make_subplots(
             rows=n_r, cols=n_c,
             shared_xaxes=shared_x,
             shared_yaxes=shared_y,
-            subplot_titles=titles,
-            horizontal_spacing=0.02,
-            vertical_spacing=0.06,
+            horizontal_spacing=_h_sp,
+            vertical_spacing=_v_sp,
         )
+        # Edge labels: column numbers across top, row letters down left
+        _pw = (1 - (n_c - 1) * _h_sp) / n_c
+        _ph = (1 - (n_r - 1) * _v_sp) / n_r
+        for ci, _sc in enumerate(_sorted_arr_cols):
+            fig.add_annotation(
+                x=ci * (_pw + _h_sp) + _pw / 2, y=1.06,
+                xref="paper", yref="paper",
+                text=f"<b>{_sc}</b>", showarrow=False,
+                font=dict(size=22, color="#222222", family="sans-serif"),
+                xanchor="center", yanchor="bottom",
+            )
+        for ri, _sr in enumerate(_sorted_arr_rows):
+            fig.add_annotation(
+                x=1.04, y=1 - ri * (_ph + _v_sp) - _ph / 2,
+                xref="paper", yref="paper",
+                text=f"<b>{_sr}</b>", showarrow=False,
+                font=dict(size=22, color="#222222", family="sans-serif"),
+                xanchor="left", yanchor="middle",
+            )
         for ri, _sr in enumerate(_sorted_arr_rows):
             for ci, _sc in enumerate(_sorted_arr_cols):
                 if (_sr, _sc) in _arr_map:
                     _oi, _p = _arr_map[(_sr, _sc)]
                     _dx, _dy = _ds(_p["x"], _p[data_key])
                     fig.add_trace(go.Scattergl(
-                        x=_dx, y=_dy,
+                        x=_dx / 60, y=_dy,
                         mode=_trace_mode, marker=_marker,
                         line=dict(color=PALETTE[_oi % len(PALETTE)], width=2),
                         showlegend=False,
@@ -1087,7 +1099,7 @@ elif array_plot_mode:
                     if data_key == "temp":
                         _bx, _by = _ds(_block_x, _block_y)
                         fig.add_trace(go.Scattergl(
-                            x=_bx, y=_by,
+                            x=_bx / 60, y=_by,
                             mode=_trace_mode, marker=_marker,
                             line=dict(color="#888888", width=1.2, dash="dash"),
                             showlegend=False,
@@ -1098,12 +1110,20 @@ elif array_plot_mode:
             font=PLOT_LAYOUT["font"],
             showlegend=False,
             height=max(n_r * height_per_row, 200),
-            margin=dict(l=50, r=10, t=40, b=30),
+            margin=dict(l=40, r=80, t=75, b=30),
             hovermode="x unified",
             uirevision=uiprefix,
         )
-        fig.update_xaxes(gridcolor="#eeeeee", linecolor="#cccccc", zerolinecolor="#cccccc")
-        fig.update_yaxes(gridcolor="#eeeeee", linecolor="#cccccc", zerolinecolor="#cccccc")
+        fig.update_xaxes(
+            gridcolor="#e0e0e0", linecolor="#aaaaaa", zerolinecolor="#cccccc",
+            showline=True, mirror=True, linewidth=1.2,
+            tickfont=dict(size=13),
+        )
+        fig.update_yaxes(
+            gridcolor="#e0e0e0", linecolor="#aaaaaa", zerolinecolor="#cccccc",
+            showline=True, mirror=True, linewidth=1.2,
+            tickfont=dict(size=13),
+        )
         if _arr_axis_mode == "Common range":
             _all_y = [v for (_, _p) in _arr_map.values() for v in _p[data_key] if np.isfinite(v)]
             if _all_y:
@@ -1154,19 +1174,19 @@ else:
     for i, p in enumerate(results["plots"]):
         _dx, _dy = _ds(p["x"], p["temp"])
         fig1.add_trace(go.Scatter(
-            x=_dx, y=_dy, name=p["label"],
+            x=_dx / 60, y=_dy, name=p["label"],
             mode=_trace_mode, marker=_marker,
             line=dict(color=PALETTE[i % len(PALETTE)], width=1.8),
         ))
     _bx, _by = _ds(results["plots"][0]["x"], results["plots"][0]["block_temp"])
     fig1.add_trace(go.Scatter(
-        x=_bx, y=_by,
+        x=_bx / 60, y=_by,
         name="BlockRef",
         mode=_trace_mode, marker=_marker,
         line=dict(color="#888888", width=1.5, dash="dash"),
     ))
     fig1.update_layout(**PLOT_LAYOUT,
-        xaxis_title="Time (s)", yaxis_title="Temperature (°C)", height=350,
+        xaxis_title="Time (min)", yaxis_title="Temperature (°C)", height=350,
         uirevision="temp")
     st.plotly_chart(fig1, use_container_width=True)
 
@@ -1177,12 +1197,12 @@ else:
     for i, p in enumerate(results["plots"]):
         _dx, _dy = _ds(p["x"], p["y"])
         fig2.add_trace(go.Scatter(
-            x=_dx, y=_dy, name=p["label"],
+            x=_dx / 60, y=_dy, name=p["label"],
             mode=_trace_mode, marker=_marker,
             line=dict(color=PALETTE[i % len(PALETTE)], width=2),
         ))
     fig2.update_layout(**PLOT_LAYOUT,
-        xaxis_title="Time (s)", yaxis_title="Heat (J)", height=400,
+        xaxis_title="Time (min)", yaxis_title="Heat (J)", height=400,
         uirevision="heat")
     st.plotly_chart(fig2, use_container_width=True)
 
@@ -1195,12 +1215,12 @@ else:
     for i, p in enumerate(results["plots"]):
         _dx, _dy = _ds(p["x"], p["power"])
         fig3.add_trace(go.Scatter(
-            x=_dx, y=_dy, name=p["label"],
+            x=_dx / 60, y=_dy, name=p["label"],
             mode=_trace_mode, marker=_marker,
             line=dict(color=PALETTE[i % len(PALETTE)], width=2),
         ))
     fig3.update_layout(**PLOT_LAYOUT,
-        xaxis_title="Time (s)", yaxis_title="Power (W)", height=400,
+        xaxis_title="Time (min)", yaxis_title="Power (W)", height=400,
         uirevision="power")
     st.plotly_chart(fig3, use_container_width=True)
 
