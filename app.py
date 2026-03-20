@@ -310,7 +310,8 @@ def infer_schema_and_build(df: pd.DataFrame):
 
     if len(valid) >= 2:
         # 1. Prefer name-based BlockRef detection ("block" anywhere in prefix)
-        block_prefix = next((p for p in valid if "block" in p.lower()), None)
+        block_prefixes = [p for p in valid if "block" in p.lower()]
+        block_prefix = block_prefixes[0] if block_prefixes else None
 
         # 2. Fallback: TagID annotation heuristic (channels with TagID → sensors; without → BlockRef)
         if block_prefix is None:
@@ -351,14 +352,31 @@ def infer_schema_and_build(df: pd.DataFrame):
             return data_dict, "sense_multi", ch_labels, warnings
 
         if block_prefix:
-            sensor_prefixes = [p for p in valid if p != block_prefix]
+            sensor_prefixes = [p for p in valid if p not in block_prefixes]
             if sensor_prefixes:
+                # Build BlockRef: average all block channels onto the first one's time axis
                 bg = valid[block_prefix]
                 br_t, br_T = _drop_nans(
                     _to_float64(df[bg["time_col"]]),
                     _to_float64(df[bg["temp_col"]]),
                     "BlockRef", warnings,
                 )
+                if len(block_prefixes) > 1:
+                    extra_Ts = []
+                    for bp in block_prefixes[1:]:
+                        _bt, _bT = _drop_nans(
+                            _to_float64(df[valid[bp]["time_col"]]),
+                            _to_float64(df[valid[bp]["temp_col"]]),
+                            bp, warnings,
+                        )
+                        if len(_bt) >= 2:
+                            extra_Ts.append(np.interp(br_t, _bt, _bT))
+                    if extra_Ts:
+                        br_T = np.mean([br_T] + extra_Ts, axis=0)
+                    warnings.append(
+                        f"{len(block_prefixes)} BlockRef channels detected "
+                        f"({', '.join(block_prefixes)}) — temperatures averaged."
+                    )
                 data_dict = {"BlockRef": {"time": br_t, "temp": br_T}}
                 ch_labels = {}
 
@@ -437,7 +455,7 @@ _HEAT_TABLE_CSS = """
 
 def _render_heat_table(plots):
     """Display final heat values as a row × column well-plate table."""
-    _rre = re.compile(r'^([A-Za-z]+)(\d+)$')
+    _rre = re.compile(r'^([A-Za-z]+)(\d+)')
     _grid, _rows, _cols, _other = {}, set(), set(), []
     for _p in plots:
         _m = _rre.match(str(_p["label"]))
@@ -746,7 +764,7 @@ if _show_sel:
             st.session_state[f"chk_{_ch}"] = False
 
     # Split channels into well-plate grid and others
-    _sel_re = re.compile(r'^([A-Za-z]+)(\d+)$')
+    _sel_re = re.compile(r'^([A-Za-z]+)(\d+)')
     _sel_grid = {}   # (row_letter, col_num) -> (orig_i, ch_key)
     _sel_other = []  # (orig_i, ch_key) for non-matching channels
     for _i, _ch in enumerate(_all_channels):
@@ -894,7 +912,7 @@ def _ds(x, y, n=1800):
 
 if column_plot_mode:
     # --- Column Plot: group channels by trailing digit(s) ---
-    _col_re = re.compile(r'(\d+)$')
+    _col_re = re.compile(r'^[A-Za-z]+(\d+)')
     col_groups: dict = {}
     for _orig_i, _p in enumerate(results["plots"]):
         _m = _col_re.search(str(_p["label"]))
@@ -1028,7 +1046,7 @@ elif row_plot_mode:
 
 elif array_plot_mode:
     # --- Array plot: each channel in its own subplot, well-plate grid ---
-    _arr_re = re.compile(r'^([A-Za-z]+)(\d+)$')
+    _arr_re = re.compile(r'^([A-Za-z]+)(\d+)')
     _arr_rows, _arr_cols, _arr_map, _arr_other = set(), set(), {}, []
     for _orig_i, _p in enumerate(results["plots"]):
         _m = _arr_re.match(str(_p["label"]))
