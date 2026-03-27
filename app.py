@@ -501,7 +501,7 @@ with st.sidebar:
     _plot_view = st.radio(
         "Plot view",
         options=["All-in-one", "Array", "Row", "Column"],
-        index=0,
+        index=1,
         horizontal=False,
         help="All-in-one: all channels overlaid on one graph.\n"
              "Array: each channel on its own plot in a well-plate grid.\n"
@@ -910,6 +910,11 @@ def _ds(x, y, n=1800):
     idx = np.array(selected)
     return x[idx], y[idx]
 
+# Time unit (set by widget in Array section, persists via session state)
+_time_mins = st.session_state.get("_time_mins", False)
+_t_div   = 60.0 if _time_mins else 1.0
+_t_label = "Time (min)" if _time_mins else "Time (s)"
+
 if column_plot_mode:
     # --- Column Plot: group channels by trailing digit(s) ---
     _col_re = re.compile(r'^[A-Za-z]+(\d+)')
@@ -932,20 +937,20 @@ if column_plot_mode:
                     for _oi, _p in col_groups[_key]:
                         _dx, _dy = _ds(_p["x"], _p[data_key])
                         _fig.add_trace(go.Scatter(
-                            x=_dx / 60, y=_dy, name=_p["label"],
+                            x=_dx / _t_div, y=_dy, name=_p["label"],
                             mode=_trace_mode, marker=_marker,
                             line=dict(color=PALETTE[_oi % len(PALETTE)], width=2),
                         ))
                     if data_key == "temp":
                         _bx, _by = _ds(_block_x, _block_y)
                         _fig.add_trace(go.Scatter(
-                            x=_bx / 60, y=_by, name="BlockRef",
+                            x=_bx / _t_div, y=_by, name="BlockRef",
                             mode=_trace_mode, marker=_marker,
                             line=dict(color="#888888", width=1.5, dash="dash"),
                         ))
                     _fig.update_layout(**PLOT_LAYOUT,
                         title=dict(text=f"Column {_key}", font=dict(size=14)),
-                        xaxis_title="Time (min)", yaxis_title=ylabel, height=height,
+                        xaxis_title=_t_label, yaxis_title=ylabel, height=height,
                         uirevision=f"{uiprefix}_{_key}")
                     st.plotly_chart(_fig, use_container_width=True)
 
@@ -982,19 +987,19 @@ elif row_plot_mode:
                 for _oi, _p in row_groups[_key]:
                     _dx, _dy = _ds(_p["x"], _p["temp"])
                     _fig.add_trace(go.Scatter(
-                        x=_dx / 60, y=_dy, name=_p["label"],
+                        x=_dx / _t_div, y=_dy, name=_p["label"],
                         mode=_trace_mode, marker=_marker,
                         line=dict(color=PALETTE[_oi % len(PALETTE)], width=1.8),
                     ))
                 _bx, _by = _ds(_block_x, _block_y)
                 _fig.add_trace(go.Scatter(
-                    x=_bx / 60, y=_by, name="BlockRef",
+                    x=_bx / _t_div, y=_by, name="BlockRef",
                     mode=_trace_mode, marker=_marker,
                     line=dict(color="#888888", width=1.5, dash="dash"),
                 ))
                 _fig.update_layout(**PLOT_LAYOUT,
                     title=dict(text=f"Row {_key}", font=dict(size=14)),
-                    xaxis_title="Time (min)", yaxis_title="Temperature (°C)", height=320,
+                    xaxis_title=_t_label, yaxis_title="Temperature (°C)", height=320,
                     uirevision=f"row_temp_{_key}")
                 st.plotly_chart(_fig, use_container_width=True)
 
@@ -1010,13 +1015,13 @@ elif row_plot_mode:
                 for _oi, _p in row_groups[_key]:
                     _dx, _dy = _ds(_p["x"], _p["y"])
                     _fig.add_trace(go.Scatter(
-                        x=_dx / 60, y=_dy, name=_p["label"],
+                        x=_dx / _t_div, y=_dy, name=_p["label"],
                         mode=_trace_mode, marker=_marker,
                         line=dict(color=PALETTE[_oi % len(PALETTE)], width=2),
                     ))
                 _fig.update_layout(**PLOT_LAYOUT,
                     title=dict(text=f"Row {_key}", font=dict(size=14)),
-                    xaxis_title="Time (min)", yaxis_title="Heat (J)", height=320,
+                    xaxis_title=_t_label, yaxis_title="Heat (J)", height=320,
                     uirevision=f"row_heat_{_key}")
                 st.plotly_chart(_fig, use_container_width=True)
 
@@ -1034,13 +1039,13 @@ elif row_plot_mode:
                 for _oi, _p in row_groups[_key]:
                     _dx, _dy = _ds(_p["x"], _p["power"])
                     _fig.add_trace(go.Scatter(
-                        x=_dx / 60, y=_dy, name=_p["label"],
+                        x=_dx / _t_div, y=_dy, name=_p["label"],
                         mode=_trace_mode, marker=_marker,
                         line=dict(color=PALETTE[_oi % len(PALETTE)], width=2),
                     ))
                 _fig.update_layout(**PLOT_LAYOUT,
                     title=dict(text=f"Row {_key}", font=dict(size=14)),
-                    xaxis_title="Time (min)", yaxis_title="Power (W)", height=320,
+                    xaxis_title=_t_label, yaxis_title="Power (W)", height=320,
                     uirevision=f"row_power_{_key}")
                 st.plotly_chart(_fig, use_container_width=True)
 
@@ -1109,7 +1114,7 @@ elif array_plot_mode:
                     _oi, _p = _arr_map[(_sr, _sc)]
                     _dx, _dy = _ds(_p["x"], _p[data_key])
                     fig.add_trace(go.Scattergl(
-                        x=_dx / 60, y=_dy,
+                        x=_dx / _t_div, y=_dy,
                         mode=_trace_mode, marker=_marker,
                         line=dict(color=PALETTE[_oi % len(PALETTE)], width=2),
                         showlegend=False,
@@ -1117,7 +1122,7 @@ elif array_plot_mode:
                     if data_key == "temp":
                         _bx, _by = _ds(_block_x, _block_y)
                         fig.add_trace(go.Scattergl(
-                            x=_bx / 60, y=_by,
+                            x=_bx / _t_div, y=_by,
                             mode=_trace_mode, marker=_marker,
                             line=dict(color="#888888", width=1.2, dash="dash"),
                             showlegend=False,
@@ -1166,14 +1171,19 @@ elif array_plot_mode:
                         uirevision=f"{uiprefix}_other{_ci2}")
                     st.plotly_chart(_fig, use_container_width=True)
 
-    _arr_axis_mode = st.radio(
-        "Axis scaling",
-        options=["Common range", "Shared (row Y, col X)", "Scale individually"],
-        index=0, horizontal=True,
-        help="Common range: all panels share one Y-axis range.\n"
-             "Shared: Y shared within each row, X shared within each column.\n"
-             "Scale individually: each panel auto-scales independently.",
-    )
+    _ctrl_l, _ctrl_r = st.columns([3, 1])
+    with _ctrl_l:
+        _arr_axis_mode = st.radio(
+            "Axis scaling",
+            options=["Common range", "Shared (row Y, col X)", "Scale individually"],
+            index=0, horizontal=True,
+            help="Common range: all panels share one Y-axis range.\n"
+                 "Shared: Y shared within each row, X shared within each column.\n"
+                 "Scale individually: each panel auto-scales independently.",
+        )
+    with _ctrl_r:
+        st.markdown("<div style='padding-top:28px'></div>", unsafe_allow_html=True)
+        st.toggle("Minutes", key="_time_mins", help="Display time axis in minutes instead of seconds.")
 
     st.subheader("Array plot — Temperature")
     _arr_grid("temp", "T (°C)", "arr_temp")
@@ -1192,19 +1202,19 @@ else:
     for i, p in enumerate(results["plots"]):
         _dx, _dy = _ds(p["x"], p["temp"])
         fig1.add_trace(go.Scatter(
-            x=_dx / 60, y=_dy, name=p["label"],
+            x=_dx / _t_div, y=_dy, name=p["label"],
             mode=_trace_mode, marker=_marker,
             line=dict(color=PALETTE[i % len(PALETTE)], width=1.8),
         ))
     _bx, _by = _ds(results["plots"][0]["x"], results["plots"][0]["block_temp"])
     fig1.add_trace(go.Scatter(
-        x=_bx / 60, y=_by,
+        x=_bx / _t_div, y=_by,
         name="BlockRef",
         mode=_trace_mode, marker=_marker,
         line=dict(color="#888888", width=1.5, dash="dash"),
     ))
     fig1.update_layout(**PLOT_LAYOUT,
-        xaxis_title="Time (min)", yaxis_title="Temperature (°C)", height=350,
+        xaxis_title=_t_label, yaxis_title="Temperature (°C)", height=350,
         uirevision="temp")
     st.plotly_chart(fig1, use_container_width=True)
 
@@ -1215,12 +1225,12 @@ else:
     for i, p in enumerate(results["plots"]):
         _dx, _dy = _ds(p["x"], p["y"])
         fig2.add_trace(go.Scatter(
-            x=_dx / 60, y=_dy, name=p["label"],
+            x=_dx / _t_div, y=_dy, name=p["label"],
             mode=_trace_mode, marker=_marker,
             line=dict(color=PALETTE[i % len(PALETTE)], width=2),
         ))
     fig2.update_layout(**PLOT_LAYOUT,
-        xaxis_title="Time (min)", yaxis_title="Heat (J)", height=400,
+        xaxis_title=_t_label, yaxis_title="Heat (J)", height=400,
         uirevision="heat")
     st.plotly_chart(fig2, use_container_width=True)
 
@@ -1233,12 +1243,12 @@ else:
     for i, p in enumerate(results["plots"]):
         _dx, _dy = _ds(p["x"], p["power"])
         fig3.add_trace(go.Scatter(
-            x=_dx / 60, y=_dy, name=p["label"],
+            x=_dx / _t_div, y=_dy, name=p["label"],
             mode=_trace_mode, marker=_marker,
             line=dict(color=PALETTE[i % len(PALETTE)], width=2),
         ))
     fig3.update_layout(**PLOT_LAYOUT,
-        xaxis_title="Time (min)", yaxis_title="Power (W)", height=400,
+        xaxis_title=_t_label, yaxis_title="Power (W)", height=400,
         uirevision="power")
     st.plotly_chart(fig3, use_container_width=True)
 
