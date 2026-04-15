@@ -110,7 +110,8 @@ def compute_power(x, y, tv_weight=0.3, gauss_sigma=None):
 @st.cache_data(show_spinner="Analysing…")
 def analyze(data_dict, C, K, zero_range, ch_labels=None, time_range=None,
             tv_weight=0.3, final_zero_range=None, selected_channels=None,
-            gauss_sigma=None, temp_sigma=None, alpha_env=0.0, Te=23.0):
+            gauss_sigma=None, temp_sigma=None, alpha_env=0.0, Te=23.0,
+            ref_channel=None):
     tzeroing = zero_range
 
     if 'BlockRef' not in data_dict:
@@ -134,6 +135,22 @@ def analyze(data_dict, C, K, zero_range, ch_labels=None, time_range=None,
             "Adjust the Zero start/end values."
         )
     T0avg = sumupR / countR
+
+    # Pre-compute reference channel resampled to block time (if requested)
+    _ref_temp_resampled = None
+    if ref_channel and ref_channel in data_dict:
+        _rd = data_dict[ref_channel]
+        if ref_channel == 'BlockRef':
+            _ref_temp_resampled = block_temp.copy()
+        elif len(_rd['time']) >= 2:
+            _rt_clean, _rT_clean = remove_spikes_with_time(_rd['time'], _rd['temp'], threshold=0.3)
+            if len(_rt_clean) >= 2:
+                _ref_temp_resampled = resample_temperature(
+                    _rT_clean, block_temp, _rt_clean, block_time
+                )
+                if temp_sigma is not None and len(block_time) > 1:
+                    _dt = float(block_time[1] - block_time[0])
+                    _ref_temp_resampled = gaussian_filter1d(_ref_temp_resampled, sigma=temp_sigma / _dt)
 
     plots = []
 
@@ -163,11 +180,17 @@ def analyze(data_dict, C, K, zero_range, ch_labels=None, time_range=None,
             dt = float(block_time[1] - block_time[0])
             ch_temp_resampled = gaussian_filter1d(ch_temp_resampled, sigma=temp_sigma / dt)
 
+        if _ref_temp_resampled is not None:
+            ch_temp_resampled = ch_temp_resampled - _ref_temp_resampled
+
+        # When ref subtraction is active, work entirely in differential space:
+        # zeroing zeroes the differential directly; block is not subtracted.
+        _using_ref = _ref_temp_resampled is not None
         sumup = 0
         count = 0
         for i in range(len(block_time)):
             if block_time[i] > tzeroing[0] and block_time[i] < tzeroing[1]:
-                sumup += ch_temp_resampled[i] - block_temp[i]
+                sumup += ch_temp_resampled[i] if _using_ref else ch_temp_resampled[i] - block_temp[i]
                 count += 1
         average = sumup / count
 
@@ -177,7 +200,7 @@ def analyze(data_dict, C, K, zero_range, ch_labels=None, time_range=None,
             count2 = 0
             for i in range(len(block_time)):
                 if block_time[i] > final_zero_range[0] and block_time[i] < final_zero_range[1]:
-                    sumup2 += ch_temp_resampled[i] - block_temp[i]
+                    sumup2 += ch_temp_resampled[i] if _using_ref else ch_temp_resampled[i] - block_temp[i]
                     count2 += 1
             if count2 == 0:
                 raise ValueError(
@@ -207,8 +230,12 @@ def analyze(data_dict, C, K, zero_range, ch_labels=None, time_range=None,
             t_masked, T_zerod_masked, block_temp_masked
         )
 
+        # When using ref subtraction, pass zeros for T_block so loss term uses
+        # the differential directly: K*∫ΔT dt rather than K*∫(T-T_block) dt
+        _T_block_for_energy = np.zeros_like(block_temp_masked) if _using_ref else block_temp_masked
+        _T0_for_energy = 0.0 if _using_ref else T0avg
         energy, cap_term, cond_term = calculate_energy(
-            T_zerod_masked, t_masked, block_temp_masked, C, K, T0avg,
+            T_zerod_masked, t_masked, _T_block_for_energy, C, K, _T0_for_energy,
             alpha_env=alpha_env, Te=Te,
         )
 
@@ -512,6 +539,33 @@ with st.sidebar:
     column_plot_mode = (_plot_view == "Column")
     array_plot_mode  = (_plot_view == "Array")
     st.divider()
+    st.markdown("#### Reference channel")
+    _use_ref = st.toggle("Subtract reference", value=False,
+                         help="Subtract a chosen channel's temperature from all other channels before analysis.")
+    if _use_ref and st.session_state.get("_ch_keys"):
+        _ck = st.session_state["_ch_keys"]
+        def _ref_sort_key(k):
+            _m = re.match(r'^([A-Za-z]+)(\d+)$', k)
+            if _m:
+                return (0, _m.group(1).upper(), int(_m.group(2)))
+            _m2 = re.match(r'^(\D+?)(\d+)$', k)
+            if _m2:
+                return (1, _m2.group(1).upper(), int(_m2.group(2)))
+            return (2, k, 0)
+        _ref_options = sorted(
+            [k for k in _ck if k != "BlockRef"],
+            key=_ref_sort_key
+        ) + ["BlockRef"]
+        _ref_disp = st.session_state.get("_ch_labels", {})
+        ref_channel = st.selectbox(
+            "Reference channel",
+            options=_ref_options,
+            format_func=lambda k: _ref_disp.get(k, k),
+            label_visibility="collapsed",
+        )
+    else:
+        ref_channel = None
+    st.divider()
     st.markdown("#### Temperature smoothing")
     _temp_smooth = st.toggle("Smooth T(t)", value=False)
     if _temp_smooth:
@@ -724,6 +778,8 @@ _all_times = np.concatenate([v["time"] for v in data_dict.values() if len(v["tim
 st.session_state["t_min_data"] = float(np.nanmin(_all_times))
 st.session_state["t_max_data"] = float(np.nanmax(_all_times))
 _all_channels = [k for k in data_dict if k != "BlockRef"]
+st.session_state["_ch_keys"] = list(data_dict.keys())
+st.session_state["_ch_labels"] = ch_labels
 
 if st.session_state.get("_loaded_file") != uploaded.name:
     st.session_state["_loaded_file"] = uploaded.name
@@ -862,7 +918,8 @@ try:
                       selected_channels=frozenset(selected_channels),
                       gauss_sigma=gauss_sigma,
                       temp_sigma=temp_sigma,
-                      alpha_env=float(alpha_env))
+                      alpha_env=float(alpha_env),
+                      ref_channel=ref_channel)
 except ValueError as e:
     st.error(str(e))
     st.stop()
@@ -941,7 +998,7 @@ if column_plot_mode:
                             mode=_trace_mode, marker=_marker,
                             line=dict(color=PALETTE[_oi % len(PALETTE)], width=2),
                         ))
-                    if data_key == "temp":
+                    if data_key == "temp" and ref_channel is None:
                         _bx, _by = _ds(_block_x, _block_y)
                         _fig.add_trace(go.Scatter(
                             x=_bx / _t_div, y=_by, name="BlockRef",
@@ -991,12 +1048,13 @@ elif row_plot_mode:
                         mode=_trace_mode, marker=_marker,
                         line=dict(color=PALETTE[_oi % len(PALETTE)], width=1.8),
                     ))
-                _bx, _by = _ds(_block_x, _block_y)
-                _fig.add_trace(go.Scatter(
-                    x=_bx / _t_div, y=_by, name="BlockRef",
-                    mode=_trace_mode, marker=_marker,
-                    line=dict(color="#888888", width=1.5, dash="dash"),
-                ))
+                if ref_channel is None:
+                    _bx, _by = _ds(_block_x, _block_y)
+                    _fig.add_trace(go.Scatter(
+                        x=_bx / _t_div, y=_by, name="BlockRef",
+                        mode=_trace_mode, marker=_marker,
+                        line=dict(color="#888888", width=1.5, dash="dash"),
+                    ))
                 _fig.update_layout(**PLOT_LAYOUT,
                     title=dict(text=f"Row {_key}", font=dict(size=14)),
                     xaxis_title=_t_label, yaxis_title="Temperature (°C)", height=320,
@@ -1119,7 +1177,7 @@ elif array_plot_mode:
                         line=dict(color=PALETTE[_oi % len(PALETTE)], width=2),
                         showlegend=False,
                     ), row=ri + 1, col=ci + 1)
-                    if data_key == "temp":
+                    if data_key == "temp" and ref_channel is None:
                         _bx, _by = _ds(_block_x, _block_y)
                         fig.add_trace(go.Scattergl(
                             x=_bx / _t_div, y=_by,
@@ -1206,13 +1264,14 @@ else:
             mode=_trace_mode, marker=_marker,
             line=dict(color=PALETTE[i % len(PALETTE)], width=1.8),
         ))
-    _bx, _by = _ds(results["plots"][0]["x"], results["plots"][0]["block_temp"])
-    fig1.add_trace(go.Scatter(
-        x=_bx / _t_div, y=_by,
-        name="BlockRef",
-        mode=_trace_mode, marker=_marker,
-        line=dict(color="#888888", width=1.5, dash="dash"),
-    ))
+    if ref_channel is None:
+        _bx, _by = _ds(results["plots"][0]["x"], results["plots"][0]["block_temp"])
+        fig1.add_trace(go.Scatter(
+            x=_bx / _t_div, y=_by,
+            name="BlockRef",
+            mode=_trace_mode, marker=_marker,
+            line=dict(color="#888888", width=1.5, dash="dash"),
+        ))
     fig1.update_layout(**PLOT_LAYOUT,
         xaxis_title=_t_label, yaxis_title="Temperature (°C)", height=350,
         uirevision="temp")
