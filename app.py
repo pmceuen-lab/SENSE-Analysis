@@ -42,9 +42,10 @@ def remove_spikes_with_time(time, data, threshold=0.3):
     if len(data_clean) < 3:
         return time_clean, data_clean
 
-    diff_prev = np.abs(data_clean[1:-1] - data_clean[:-2])
-    diff_next = np.abs(data_clean[1:-1] - data_clean[2:])
-    is_spike = (diff_prev > threshold) | (diff_next > threshold)
+    diff_prev = data_clean[1:-1] - data_clean[:-2]   # signed
+    diff_next = data_clean[2:]   - data_clean[1:-1]  # signed
+    # True spike: large jump that immediately reverses (opposite sign differences)
+    is_spike = (np.abs(diff_prev) > threshold) & (np.abs(diff_next) > threshold) & (diff_prev * diff_next < 0)
 
     mask = np.ones(len(data_clean), dtype=bool)
     mask[1:-1][is_spike] = False
@@ -81,7 +82,7 @@ def mask_time_range(time, data, t_min, t_max):
     return time[mask], data[mask]
 
 
-def _drop_close_points(t, *arrays, min_dt=0.3):
+def _drop_close_points(t, *arrays, min_dt=0.01):
     """Remove points where the gap from the previous kept point is < min_dt seconds."""
     t = np.asarray(t, dtype=float)
     keep = np.ones(len(t), dtype=bool)
@@ -96,15 +97,23 @@ def _drop_close_points(t, *arrays, min_dt=0.3):
 
 def compute_power(x, y, tv_weight=0.3, gauss_sigma=None):
     """Differentiate energy → TV denoise → optional Gaussian smoothing.
-    gauss_sigma is in seconds; converted to samples using median dt."""
+    Interpolates onto a uniform grid before differentiating to avoid gradient
+    spikes from non-uniform channel timestamps, then resamples back."""
+    x = np.asarray(x, dtype=float)
     y = np.asarray(y, dtype=float)
-    dy = np.gradient(y, x)
-    result = denoise_tv_chambolle(dy, weight=tv_weight)
-    if gauss_sigma is not None:
-        dt = float(np.median(np.diff(x)))
-        if dt > 0:
-            result = gaussian_filter1d(result, sigma=gauss_sigma / dt)
-    return result
+    dt = float(np.median(np.diff(x)))
+    if dt <= 0:
+        return np.zeros_like(y)
+    # Uniform grid over the same time span
+    x_uni = np.arange(x[0], x[-1] + dt * 0.5, dt)
+    y_uni = np.interp(x_uni, x, y)
+    # Differentiate on uniform grid — no non-uniform spacing artefacts
+    dy_uni = np.gradient(y_uni, dt)
+    result_uni = denoise_tv_chambolle(dy_uni, weight=tv_weight)
+    if gauss_sigma is not None and dt > 0:
+        result_uni = gaussian_filter1d(result_uni, sigma=gauss_sigma / dt)
+    # Resample back to original (native) time points
+    return np.interp(x, x_uni, result_uni)
 
 
 @st.cache_data(show_spinner="Analysing…")
@@ -122,6 +131,13 @@ def analyze(data_dict, C, K, zero_range, ch_labels=None, time_range=None,
 
     if len(block_time) == 0:
         return {'plots': []}
+
+    # Clean block temp — glitches propagate to ALL channels via interpolation.
+    # Block changes very slowly so even a tiny sign-reversing jump is an artifact.
+    block_time, block_temp = remove_spikes_with_time(block_time, block_temp, threshold=0.05)
+    # Also remove anomalously close block timestamps — near-duplicate readings
+    # create a near-vertical segment in the interpolated block that hits every channel.
+    (block_time, block_temp) = _drop_close_points(block_time, block_temp, min_dt=0.1)
 
     sumupR = 0
     countR = 0
@@ -165,42 +181,53 @@ def analyze(data_dict, C, K, zero_range, ch_labels=None, time_range=None,
         ch_time = ch_data['time']
         ch_temp = ch_data['temp']
 
+        # Strip NaNs, then remove only extreme isolated glitches (5°C threshold
+        # with sign-reversal required — fast legitimate risers are preserved).
         ch_time_clean, ch_temp_clean = remove_spikes_with_time(
-            ch_time, ch_temp, threshold=0.3
+            ch_time, ch_temp, threshold=5.0
         )
+
+        # Sort by time — np.interp requires monotonically increasing x
+        _sort_idx = np.argsort(ch_time_clean)
+        ch_time_clean = ch_time_clean[_sort_idx]
+        ch_temp_clean = ch_temp_clean[_sort_idx]
 
         if len(ch_time_clean) < 2:
             continue
 
-        ch_temp_resampled = resample_temperature(
-            ch_temp_clean, block_temp, ch_time_clean, block_time
-        )
+        # Interpolate block onto channel's native time grid — block is slow so
+        # this loses little, while interpolating the channel onto the block grid
+        # can distort fast transients.
+        block_temp_on_ch = np.interp(ch_time_clean, block_time, block_temp)
 
-        if temp_sigma is not None and len(block_time) > 1:
-            dt = float(block_time[1] - block_time[0])
-            ch_temp_resampled = gaussian_filter1d(ch_temp_resampled, sigma=temp_sigma / dt)
+        if temp_sigma is not None:
+            _dt_ch = float(np.median(np.diff(ch_time_clean)))
+            if _dt_ch > 0:
+                ch_temp_clean = gaussian_filter1d(ch_temp_clean, sigma=temp_sigma / _dt_ch)
 
-        if _ref_temp_resampled is not None:
-            ch_temp_resampled = ch_temp_resampled - _ref_temp_resampled
-
-        # When ref subtraction is active, work entirely in differential space:
-        # zeroing zeroes the differential directly; block is not subtracted.
+        # Ref subtraction: interpolate pre-computed ref (on block_time) to channel grid
         _using_ref = _ref_temp_resampled is not None
+        if _using_ref:
+            _ref_on_ch = np.interp(ch_time_clean, block_time, _ref_temp_resampled)
+            ch_temp_working = ch_temp_clean - _ref_on_ch
+        else:
+            ch_temp_working = ch_temp_clean
+
+        # Zeroing on channel's native time axis
         sumup = 0
         count = 0
-        for i in range(len(block_time)):
-            if block_time[i] > tzeroing[0] and block_time[i] < tzeroing[1]:
-                sumup += ch_temp_resampled[i] if _using_ref else ch_temp_resampled[i] - block_temp[i]
+        for i in range(len(ch_time_clean)):
+            if ch_time_clean[i] > tzeroing[0] and ch_time_clean[i] < tzeroing[1]:
+                sumup += ch_temp_working[i] if _using_ref else ch_temp_working[i] - block_temp_on_ch[i]
                 count += 1
         average = sumup / count
 
         if final_zero_range is not None:
-            # Compute offset in final zeroing window
             sumup2 = 0
             count2 = 0
-            for i in range(len(block_time)):
-                if block_time[i] > final_zero_range[0] and block_time[i] < final_zero_range[1]:
-                    sumup2 += ch_temp_resampled[i] if _using_ref else ch_temp_resampled[i] - block_temp[i]
+            for i in range(len(ch_time_clean)):
+                if ch_time_clean[i] > final_zero_range[0] and ch_time_clean[i] < final_zero_range[1]:
+                    sumup2 += ch_temp_working[i] if _using_ref else ch_temp_working[i] - block_temp_on_ch[i]
                     count2 += 1
             if count2 == 0:
                 raise ValueError(
@@ -208,22 +235,21 @@ def analyze(data_dict, C, K, zero_range, ch_labels=None, time_range=None,
                     "contains no data points. Adjust the Final zero start/end values."
                 )
             average_final = sumup2 / count2
-            # Linear correction: interpolate offset between midpoints of both windows
             t_mid1 = (tzeroing[0] + tzeroing[1]) / 2
             t_mid2 = (final_zero_range[0] + final_zero_range[1]) / 2
-            correction = average + (average_final - average) * (block_time - t_mid1) / (t_mid2 - t_mid1)
-            T_zerod = ch_temp_resampled - correction
+            correction = average + (average_final - average) * (ch_time_clean - t_mid1) / (t_mid2 - t_mid1)
+            T_zerod = ch_temp_working - correction
         else:
-            T_zerod = ch_temp_resampled - average
+            T_zerod = ch_temp_working - average
 
         # Apply time range mask after zeroing
         if time_range is not None:
             t_min, t_max = time_range
-            t_masked, T_zerod_masked = mask_time_range(block_time, T_zerod, t_min, t_max)
-            _, block_temp_masked = mask_time_range(block_time, block_temp, t_min, t_max)
+            t_masked, T_zerod_masked = mask_time_range(ch_time_clean, T_zerod, t_min, t_max)
+            _, block_temp_masked = mask_time_range(ch_time_clean, block_temp_on_ch, t_min, t_max)
         else:
-            t_masked, T_zerod_masked = block_time, T_zerod
-            block_temp_masked = block_temp
+            t_masked, T_zerod_masked = ch_time_clean, T_zerod
+            block_temp_masked = block_temp_on_ch
 
         # Drop points closer than 0.3 s to avoid gradient spikes
         t_masked, T_zerod_masked, block_temp_masked = _drop_close_points(
@@ -272,7 +298,10 @@ def _drop_nans(t, T, label, warnings):
     dropped = int(len(t) - valid.sum())
     if dropped:
         warnings.append(f"{label}: dropped {dropped} rows with NaNs.")
-    return t[valid], T[valid]
+    t_out, T_out = t[valid], T[valid]
+    # Ensure monotonically increasing timestamps for np.interp
+    sort_idx = np.argsort(t_out)
+    return t_out[sort_idx], T_out[sort_idx]
 
 
 def infer_schema_and_build(df: pd.DataFrame):
@@ -538,6 +567,9 @@ with st.sidebar:
     row_plot_mode    = (_plot_view == "Row")
     column_plot_mode = (_plot_view == "Column")
     array_plot_mode  = (_plot_view == "Array")
+    _use_downsample = st.checkbox("Downsample traces", value=True,
+        help="LTTB downsampling reduces browser load on large datasets. "
+             "Disable if you see artifacts in fast transients.")
     st.divider()
     st.markdown("#### Reference channel")
     _use_ref = st.toggle("Subtract reference", value=False,
@@ -707,6 +739,11 @@ with st.sidebar:
     st.markdown("#### Display")
     show_points = st.checkbox("Show data points", value=False)
 
+# If downsampling is disabled, replace _ds with a pass-through
+if not _use_downsample:
+    def _ds(x, y, n=1800):
+        return np.asarray(x, dtype=float), np.asarray(y, dtype=float)
+
 # ----------------------------
 # UI
 # ----------------------------
@@ -765,6 +802,9 @@ if not uploaded:
     st.stop()
 
 df = load_csv(uploaded)
+if st.button("🔄 Clear analysis cache", help="Force re-analysis with current code (use after app updates)"):
+    st.cache_data.clear()
+    st.rerun()
 df.columns = df.columns.str.strip()
 
 try:
@@ -928,6 +968,7 @@ if not results["plots"]:
     st.warning("No channels with sufficient data to analyze.")
     st.stop()
 
+
 _trace_mode = "lines+markers" if show_points else "lines"
 _marker = dict(size=3) if show_points else {}
 
@@ -996,14 +1037,14 @@ if column_plot_mode:
                         _fig.add_trace(go.Scatter(
                             x=_dx / _t_div, y=_dy, name=_p["label"],
                             mode=_trace_mode, marker=_marker,
-                            line=dict(color=PALETTE[_oi % len(PALETTE)], width=2),
+                            line=dict(color=PALETTE[_oi % len(PALETTE)], width=2, simplify=False),
                         ))
                     if data_key == "temp" and ref_channel is None:
                         _bx, _by = _ds(_block_x, _block_y)
                         _fig.add_trace(go.Scatter(
                             x=_bx / _t_div, y=_by, name="BlockRef",
                             mode=_trace_mode, marker=_marker,
-                            line=dict(color="#888888", width=1.5, dash="dash"),
+                            line=dict(color="#888888", width=1.5, dash="dash", simplify=False),
                         ))
                     _fig.update_layout(**PLOT_LAYOUT,
                         title=dict(text=f"Column {_key}", font=dict(size=14)),
@@ -1053,7 +1094,7 @@ elif row_plot_mode:
                     _fig.add_trace(go.Scatter(
                         x=_bx / _t_div, y=_by, name="BlockRef",
                         mode=_trace_mode, marker=_marker,
-                        line=dict(color="#888888", width=1.5, dash="dash"),
+                        line=dict(color="#888888", width=1.5, dash="dash", simplify=False),
                     ))
                 _fig.update_layout(**PLOT_LAYOUT,
                     title=dict(text=f"Row {_key}", font=dict(size=14)),
@@ -1075,7 +1116,7 @@ elif row_plot_mode:
                     _fig.add_trace(go.Scatter(
                         x=_dx / _t_div, y=_dy, name=_p["label"],
                         mode=_trace_mode, marker=_marker,
-                        line=dict(color=PALETTE[_oi % len(PALETTE)], width=2),
+                        line=dict(color=PALETTE[_oi % len(PALETTE)], width=2, simplify=False),
                     ))
                 _fig.update_layout(**PLOT_LAYOUT,
                     title=dict(text=f"Row {_key}", font=dict(size=14)),
@@ -1099,7 +1140,7 @@ elif row_plot_mode:
                     _fig.add_trace(go.Scatter(
                         x=_dx / _t_div, y=_dy, name=_p["label"],
                         mode=_trace_mode, marker=_marker,
-                        line=dict(color=PALETTE[_oi % len(PALETTE)], width=2),
+                        line=dict(color=PALETTE[_oi % len(PALETTE)], width=2, simplify=False),
                     ))
                 _fig.update_layout(**PLOT_LAYOUT,
                     title=dict(text=f"Row {_key}", font=dict(size=14)),
@@ -1220,7 +1261,7 @@ elif array_plot_mode:
                     _fig.add_trace(go.Scatter(
                         x=_p2["x"], y=_p2[data_key],
                         mode=_trace_mode, marker=_marker,
-                        line=dict(color=PALETTE[_oi2 % len(PALETTE)], width=2),
+                        line=dict(color=PALETTE[_oi2 % len(PALETTE)], width=2, simplify=False),
                         showlegend=False,
                     ))
                     _fig.update_layout(**_arr_layout,
@@ -1262,7 +1303,7 @@ else:
         fig1.add_trace(go.Scatter(
             x=_dx / _t_div, y=_dy, name=p["label"],
             mode=_trace_mode, marker=_marker,
-            line=dict(color=PALETTE[i % len(PALETTE)], width=1.8),
+            line=dict(color=PALETTE[i % len(PALETTE)], width=1.8, simplify=False),
         ))
     if ref_channel is None:
         _bx, _by = _ds(results["plots"][0]["x"], results["plots"][0]["block_temp"])
@@ -1270,7 +1311,7 @@ else:
             x=_bx / _t_div, y=_by,
             name="BlockRef",
             mode=_trace_mode, marker=_marker,
-            line=dict(color="#888888", width=1.5, dash="dash"),
+            line=dict(color="#888888", width=1.5, dash="dash", simplify=False),
         ))
     fig1.update_layout(**PLOT_LAYOUT,
         xaxis_title=_t_label, yaxis_title="Temperature (°C)", height=350,
@@ -1286,7 +1327,7 @@ else:
         fig2.add_trace(go.Scatter(
             x=_dx / _t_div, y=_dy, name=p["label"],
             mode=_trace_mode, marker=_marker,
-            line=dict(color=PALETTE[i % len(PALETTE)], width=2),
+            line=dict(color=PALETTE[i % len(PALETTE)], width=2, simplify=False),
         ))
     fig2.update_layout(**PLOT_LAYOUT,
         xaxis_title=_t_label, yaxis_title="Heat (J)", height=400,
@@ -1304,22 +1345,27 @@ else:
         fig3.add_trace(go.Scatter(
             x=_dx / _t_div, y=_dy, name=p["label"],
             mode=_trace_mode, marker=_marker,
-            line=dict(color=PALETTE[i % len(PALETTE)], width=2),
+            line=dict(color=PALETTE[i % len(PALETTE)], width=2, simplify=False),
         ))
     fig3.update_layout(**PLOT_LAYOUT,
         xaxis_title=_t_label, yaxis_title="Power (W)", height=400,
         uirevision="power")
     st.plotly_chart(fig3, use_container_width=True)
 
-# Export
-out = pd.DataFrame({
-    "Time (s)":        results["plots"][0]["x"],
-    "BlockRef_Temp (°C)": results["plots"][0]["block_temp"],
-})
+# Export — each channel has its own time axis so use per-channel time columns
+_max_len = max(len(p["x"]) for p in results["plots"])
+def _pad(arr):
+    n = _max_len - len(arr)
+    return arr if n == 0 else np.concatenate([arr, np.full(n, np.nan)])
+
+_out_dict = {}
 for p in results["plots"]:
-    out[p["label"] + "_Temp (°C)"]  = p["temp"]
-    out[p["label"] + "_Heat (J)"]   = p["y"]
-    out[p["label"] + "_Power (W)"]  = p["power"]
+    _lbl = p["label"]
+    _out_dict[_lbl + "_Time (s)"]  = _pad(p["x"])
+    _out_dict[_lbl + "_Temp (°C)"] = _pad(p["temp"])
+    _out_dict[_lbl + "_Heat (J)"]  = _pad(p["y"])
+    _out_dict[_lbl + "_Power (W)"] = _pad(p["power"])
+out = pd.DataFrame(_out_dict)
 
 analysis_window = (
     f"{time_range[0]:.1f} - {time_range[1]:.1f} s" if time_range else "full range"
