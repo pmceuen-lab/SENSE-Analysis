@@ -523,11 +523,51 @@ def infer_schema_and_build(df: pd.DataFrame):
 
                 return data_dict, "sense_multi", ch_labels, warnings
 
+    # ── Schema C: time_chN / dT_chN (or T_chN) prefix-paired columns ────────
+    _pairs: dict = {}
+    for col in cols:
+        _mt = re.match(r'^time_(.+)$', col, re.IGNORECASE)
+        _md = re.match(r'^d[Tt]_(.+)$', col, re.IGNORECASE)
+        _mT = re.match(r'^[Tt]_(.+)$', col)
+        if _mt:
+            _pairs.setdefault(_mt.group(1), {})['time'] = col
+        elif _md:
+            _pairs.setdefault(_md.group(1), {})['temp'] = col
+        elif _mT:
+            _pairs.setdefault(_mT.group(1), {})['temp'] = col
+
+    _valid_pairs = {k: v for k, v in _pairs.items() if 'time' in v and 'temp' in v}
+    if _valid_pairs:
+        def _nat_key(s):
+            return [int(c) if c.isdigit() else c.lower()
+                    for c in re.split(r'([0-9]+)', s)]
+        _sorted_ids = sorted(_valid_pairs.keys(), key=_nat_key)
+        first_g = _valid_pairs[_sorted_ids[0]]
+        br_t = _to_float64(df[first_g['time']])
+        br_t = br_t[~np.isnan(br_t)]
+        data_dict = {"BlockRef": {"time": br_t, "temp": np.zeros(len(br_t))}}
+        ch_labels = {}
+        for idx, ch_id in enumerate(_sorted_ids[:24]):
+            g = _valid_pairs[ch_id]
+            ch_t, ch_T = _drop_nans(
+                _to_float64(df[g['time']]),
+                _to_float64(df[g['temp']]),
+                ch_id, warnings,
+            )
+            ch_name = f"Ch{idx}"
+            data_dict[ch_name] = {"time": ch_t, "temp": ch_T}
+            ch_labels[ch_name] = ch_id
+        warnings.append(
+            "Detected time_chN / dT_chN format — synthetic zero reference used."
+        )
+        return data_dict, "dt_pairs", ch_labels, warnings
+
     raise ValueError(
         "Could not detect CSV format. Supported formats:\n"
         "  • Single shared time column with Ch0, Ch1, Ch2, Ch3, BlockRef columns\n"
         "  • Per-channel columns where each channel has a timestamp and temperature column\n"
         "    (e.g. Ch0_Time + Ch0_Temp, BlockRef_Time + BlockRef_Temp).\n"
+        "  • Prefix-paired columns: time_chN + dT_chN (or T_chN) per channel\n"
         "    BlockRef is identified by its name containing 'block', or by having no TagID: entries in its annotation column."
     )
 
