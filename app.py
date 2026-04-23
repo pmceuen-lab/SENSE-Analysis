@@ -95,6 +95,80 @@ def _drop_close_points(t, *arrays, min_dt=0.01):
     return (t[keep],) + tuple(np.asarray(a)[keep] for a in arrays)
 
 
+def detect_rise_start(t, T, rise_thresh=0.5, n_consec=3):
+    """Return the time where T rises persistently above its local baseline.
+
+    Since p["temp"] is already zeroed to ~0 at baseline, we use the first
+    10% of points (min 20) as the baseline window, then find the first run of
+    n_consec consecutive points above baseline_mean + max(rise_thresh, 5*std).
+    Returns None for flat channels that never reach the threshold.
+    """
+    t = np.asarray(t, dtype=float)
+    T = np.asarray(T, dtype=float)
+    if len(t) < 20:
+        return None
+
+    n_base = max(20, len(t) // 10)
+    base_mean = float(np.mean(T[:n_base]))
+    base_std  = float(np.std(T[:n_base]))
+    threshold = base_mean + max(rise_thresh, 5.0 * base_std)
+
+    # Flat / no-rise channels
+    if float(T.max()) < threshold:
+        return None
+
+    # First run of n_consec consecutive points above threshold
+    count = 0
+    for i in range(n_base, len(t)):
+        if T[i] > threshold:
+            count += 1
+            if count >= n_consec:
+                return float(t[i - n_consec + 1])
+        else:
+            count = 0
+    return None
+
+
+def compute_rise_time(t, T, p_lo=0.10, p_hi=0.90):
+    """Compute rise time from p_lo to p_hi of the temperature amplitude.
+
+    Returns (rise_time_s, t_lo, t_hi) or (None, None, None) if no clear rise.
+    t_lo and t_hi are in the same units as t (seconds).
+    """
+    t = np.asarray(t, dtype=float)
+    T = np.asarray(T, dtype=float)
+    if len(t) < 20:
+        return None, None, None
+
+    n_base = max(20, len(t) // 10)
+    base_level = float(np.mean(T[:n_base]))
+    peak_val   = float(T.max())
+    amplitude  = peak_val - base_level
+    if amplitude < 0.3:
+        return None, None, None
+
+    lvl_lo = base_level + p_lo * amplitude
+    lvl_hi = base_level + p_hi * amplitude
+
+    t_lo = None
+    for i in range(n_base, len(t)):
+        if T[i] >= lvl_lo:
+            t_lo = float(t[i])
+            break
+    if t_lo is None:
+        return None, None, None
+
+    t_hi = None
+    for i in range(n_base, len(t)):
+        if t[i] >= t_lo and T[i] >= lvl_hi:
+            t_hi = float(t[i])
+            break
+    if t_hi is None:
+        return None, None, None
+
+    return t_hi - t_lo, t_lo, t_hi
+
+
 def compute_power(x, y, tv_weight=0.3, gauss_sigma=None):
     """Differentiate energy → TV denoise → optional Gaussian smoothing.
     Interpolates onto a uniform grid before differentiating to avoid gradient
@@ -541,6 +615,41 @@ def _render_heat_table(plots):
             _col.metric(_p["label"], f"{_p['y'][-1]:.1f} J")
 
 
+def _render_rise_table(plots, t_div=1.0, t_unit="s"):
+    """Display 10–90% rise times as a well-plate grid table."""
+    _rre = re.compile(r'^([A-Za-z]+)(\d+)')
+    _grid, _rows, _cols, _other = {}, set(), set(), []
+    for _p in plots:
+        _rt, _, _ = compute_rise_time(_p["x"], _p["temp"])
+        _m = _rre.match(str(_p["label"]))
+        if _m:
+            _r, _c = _m.group(1).upper(), int(_m.group(2))
+            _rows.add(_r); _cols.add(_c)
+            _grid[(_r, _c)] = (_rt / t_div) if _rt is not None else None
+        else:
+            _other.append((_p["label"], (_rt / t_div) if _rt is not None else None))
+
+    st.markdown(f"**Rise time 10–90% ({t_unit})**")
+    if _rows:
+        _df = pd.DataFrame(index=sorted(_rows), columns=sorted(_cols), dtype=float)
+        _df.index.name = None
+        for (_r, _c), _v in _grid.items():
+            if _v is not None:
+                _df.loc[_r, _c] = _v
+        _html = _df.style.format("{:.2f}", na_rep="—").to_html()
+        st.markdown(_HEAT_TABLE_CSS + f"<div class='ht-wrap'>{_html}</div>",
+                    unsafe_allow_html=True)
+        if _other:
+            _oc = st.columns(len(_other))
+            for _col, (lbl, val) in zip(_oc, _other):
+                _col.metric(lbl, f"{val:.2f} {t_unit}" if val is not None else "—")
+    else:
+        _mc = st.columns(len(plots))
+        for _col, _p in zip(_mc, plots):
+            _rt, _, _ = compute_rise_time(_p["x"], _p["temp"])
+            _col.metric(_p["label"], f"{_rt/t_div:.2f} {t_unit}" if _rt else "—")
+
+
 # ----------------------------
 # Sidebar (always visible)
 # ----------------------------
@@ -570,6 +679,9 @@ with st.sidebar:
     _use_downsample = st.checkbox("Downsample traces", value=True,
         help="LTTB downsampling reduces browser load on large datasets. "
              "Disable if you see artifacts in fast transients.")
+    _align_rise = st.toggle("Align rise start", value=False,
+        help="Shifts each channel's time axis so the start of its temperature rise "
+             "lands at t=0. Channels with no detectable rise use the median rise time.")
     st.divider()
     st.markdown("#### Reference channel")
     _use_ref = st.toggle("Subtract reference", value=False,
@@ -1013,6 +1125,30 @@ _time_mins = st.session_state.get("_time_mins", False)
 _t_div   = 60.0 if _time_mins else 1.0
 _t_label = "Time (min)" if _time_mins else "Time (s)"
 
+# Per-channel rise alignment.
+# Each channel is shifted by its own detected rise time so its riser lands at t=0.
+# Channels where detection fails fall back to the median of detected rises.
+_rise_shifts: dict = {}
+if _align_rise:
+    _detected = {_p["label"]: detect_rise_start(_p["x"], _p["temp"])
+                 for _p in results["plots"]}
+    _valid_rises = [r for r in _detected.values() if r is not None]
+    _fallback = float(np.median(_valid_rises)) if _valid_rises else 0.0
+    _rise_shifts = {lbl: (r if r is not None else _fallback)
+                    for lbl, r in _detected.items()}
+    _t_label = ("Time from rise (min)" if _time_mins else "Time from rise (s)")
+    with st.expander("Rise detection debug", expanded=True):
+        st.dataframe(pd.DataFrame([
+            {"Channel": lbl,
+             "Detected rise (s)": f"{r:.1f}" if r is not None else "MISSED",
+             "Shift applied (s)": f"{_rise_shifts[lbl]:.1f}"}
+            for lbl, r in _detected.items()
+        ]), use_container_width=True, hide_index=True)
+
+def _tx(p):
+    """Return time array for p, shifted so rise lands at t=0 (display only)."""
+    return p["x"] - _rise_shifts.get(p["label"], 0.0)
+
 if column_plot_mode:
     # --- Column Plot: group channels by trailing digit(s) ---
     _col_re = re.compile(r'^[A-Za-z]+(\d+)')
@@ -1033,7 +1169,7 @@ if column_plot_mode:
                 with _rcols[_ci]:
                     _fig = go.Figure()
                     for _oi, _p in col_groups[_key]:
-                        _dx, _dy = _ds(_p["x"], _p[data_key])
+                        _dx, _dy = _ds(_tx(_p), _p[data_key])
                         _fig.add_trace(go.Scatter(
                             x=_dx / _t_div, y=_dy, name=_p["label"],
                             mode=_trace_mode, marker=_marker,
@@ -1058,6 +1194,8 @@ if column_plot_mode:
     st.subheader("Column plot — Heat")
     _col_grid("y", "Heat (J)", "col_heat")
     _render_heat_table(results["plots"])
+    _render_rise_table(results["plots"], t_div=_t_div,
+                       t_unit="min" if _time_mins else "s")
     st.divider()
     st.subheader("Column plot — Power")
     _col_grid("power", "Power (W)", "col_power")
@@ -1083,7 +1221,7 @@ elif row_plot_mode:
             with _rcols[_ci]:
                 _fig = go.Figure()
                 for _oi, _p in row_groups[_key]:
-                    _dx, _dy = _ds(_p["x"], _p["temp"])
+                    _dx, _dy = _ds(_tx(_p), _p["temp"])
                     _fig.add_trace(go.Scatter(
                         x=_dx / _t_div, y=_dy, name=_p["label"],
                         mode=_trace_mode, marker=_marker,
@@ -1112,7 +1250,7 @@ elif row_plot_mode:
             with _rcols[_ci]:
                 _fig = go.Figure()
                 for _oi, _p in row_groups[_key]:
-                    _dx, _dy = _ds(_p["x"], _p["y"])
+                    _dx, _dy = _ds(_tx(_p), _p["y"])
                     _fig.add_trace(go.Scatter(
                         x=_dx / _t_div, y=_dy, name=_p["label"],
                         mode=_trace_mode, marker=_marker,
@@ -1125,6 +1263,8 @@ elif row_plot_mode:
                 st.plotly_chart(_fig, use_container_width=True)
 
     _render_heat_table(results["plots"])
+    _render_rise_table(results["plots"], t_div=_t_div,
+                       t_unit="min" if _time_mins else "s")
 
     st.divider()
 
@@ -1136,7 +1276,7 @@ elif row_plot_mode:
             with _rcols[_ci]:
                 _fig = go.Figure()
                 for _oi, _p in row_groups[_key]:
-                    _dx, _dy = _ds(_p["x"], _p["power"])
+                    _dx, _dy = _ds(_tx(_p), _p["power"])
                     _fig.add_trace(go.Scatter(
                         x=_dx / _t_div, y=_dy, name=_p["label"],
                         mode=_trace_mode, marker=_marker,
@@ -1211,7 +1351,7 @@ elif array_plot_mode:
             for ci, _sc in enumerate(_sorted_arr_cols):
                 if (_sr, _sc) in _arr_map:
                     _oi, _p = _arr_map[(_sr, _sc)]
-                    _dx, _dy = _ds(_p["x"], _p[data_key])
+                    _dx, _dy = _ds(_tx(_p), _p[data_key])
                     fig.add_trace(go.Scattergl(
                         x=_dx / _t_div, y=_dy,
                         mode=_trace_mode, marker=_marker,
@@ -1290,6 +1430,8 @@ elif array_plot_mode:
     st.subheader("Array plot — Heat")
     _arr_grid("y", "Heat (J)", "arr_heat")
     _render_heat_table(results["plots"])
+    _render_rise_table(results["plots"], t_div=_t_div,
+                       t_unit="min" if _time_mins else "s")
     st.divider()
     st.subheader("Array plot — Power")
     _arr_grid("power", "P (W)", "arr_power")
@@ -1299,7 +1441,7 @@ else:
     st.subheader("Zeroed temperature traces")
     fig1 = go.Figure()
     for i, p in enumerate(results["plots"]):
-        _dx, _dy = _ds(p["x"], p["temp"])
+        _dx, _dy = _ds(_tx(p), p["temp"])
         fig1.add_trace(go.Scatter(
             x=_dx / _t_div, y=_dy, name=p["label"],
             mode=_trace_mode, marker=_marker,
@@ -1323,7 +1465,7 @@ else:
     st.subheader("Heat traces")
     fig2 = go.Figure()
     for i, p in enumerate(results["plots"]):
-        _dx, _dy = _ds(p["x"], p["y"])
+        _dx, _dy = _ds(_tx(p), p["y"])
         fig2.add_trace(go.Scatter(
             x=_dx / _t_div, y=_dy, name=p["label"],
             mode=_trace_mode, marker=_marker,
@@ -1335,13 +1477,15 @@ else:
     st.plotly_chart(fig2, use_container_width=True)
 
     _render_heat_table(results["plots"])
+    _render_rise_table(results["plots"], t_div=_t_div,
+                       t_unit="min" if _time_mins else "s")
 
     st.divider()
 
     st.subheader("Power traces")
     fig3 = go.Figure()
     for i, p in enumerate(results["plots"]):
-        _dx, _dy = _ds(p["x"], p["power"])
+        _dx, _dy = _ds(_tx(p), p["power"])
         fig3.add_trace(go.Scatter(
             x=_dx / _t_div, y=_dy, name=p["label"],
             mode=_trace_mode, marker=_marker,
