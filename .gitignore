@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+streamlit_run.log
+logo_backup_*.png
+.venv/
