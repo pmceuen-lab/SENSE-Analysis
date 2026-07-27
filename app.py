@@ -129,46 +129,6 @@ def detect_rise_start(t, T, rise_thresh=0.5, n_consec=3):
     return None
 
 
-def compute_rise_time(t, T, p_lo=0.10, p_hi=0.90):
-    """Compute rise time from p_lo to p_hi of the temperature amplitude.
-
-    Returns (rise_time_s, t_lo, t_hi) or (None, None, None) if no clear rise.
-    t_lo and t_hi are in the same units as t (seconds).
-    """
-    t = np.asarray(t, dtype=float)
-    T = np.asarray(T, dtype=float)
-    if len(t) < 20:
-        return None, None, None
-
-    n_base = max(20, len(t) // 10)
-    base_level = float(np.mean(T[:n_base]))
-    peak_val   = float(T.max())
-    amplitude  = peak_val - base_level
-    if amplitude < 0.3:
-        return None, None, None
-
-    lvl_lo = base_level + p_lo * amplitude
-    lvl_hi = base_level + p_hi * amplitude
-
-    t_lo = None
-    for i in range(n_base, len(t)):
-        if T[i] >= lvl_lo:
-            t_lo = float(t[i])
-            break
-    if t_lo is None:
-        return None, None, None
-
-    t_hi = None
-    for i in range(n_base, len(t)):
-        if t[i] >= t_lo and T[i] >= lvl_hi:
-            t_hi = float(t[i])
-            break
-    if t_hi is None:
-        return None, None, None
-
-    return t_hi - t_lo, t_lo, t_hi
-
-
 def compute_power(x, y, tv_weight=0.3, gauss_sigma=None):
     """Differentiate energy → TV denoise → optional Gaussian smoothing.
     Interpolates onto a uniform grid before differentiating to avoid gradient
@@ -415,8 +375,8 @@ def infer_schema_and_build(df: pd.DataFrame):
 
     # ── Per-channel detection (flexible suffixes, any naming convention) ───────
     # Accepted suffixes for time, temperature, and annotation columns
-    TIME_SFXS = ["_Timestamp (s)", "_Timestamp", "_Time", "_time", "_timestamp"]
-    TEMP_SFXS = ["_Temp (C)", "_Temperature (C)", "_Temp", "_Temperature", "_temp"]
+    TIME_SFXS = ["_Timestamp (s)", "_Timestamp", "_Time (s)", "_Time", "_time", "_timestamp"]
+    TEMP_SFXS = ["_Temp (°C)", "_Temp (C)", "_Temperature (C)", "_Temp", "_Temperature", "_temp"]
     ANN_SFXS  = ["_Annotations", "_Annotation", "_annotations", "_annotation"]
 
     def _match_suffix(col, sfx_list):
@@ -574,7 +534,9 @@ def infer_schema_and_build(df: pd.DataFrame):
 
 @st.cache_data(show_spinner=False)
 def load_csv(uploaded_file) -> pd.DataFrame:
-    return pd.read_csv(uploaded_file)
+    # Skip leading "# key,value" metadata lines (present in exported _analysis.csv
+    # files) so the real header row is detected correctly.
+    return pd.read_csv(uploaded_file, comment="#")
 
 
 PALETTE = [
@@ -653,41 +615,6 @@ def _render_heat_table(plots):
         _mc = st.columns(len(plots))
         for _col, _p in zip(_mc, plots):
             _col.metric(_p["label"], f"{_p['y'][-1]:.1f} J")
-
-
-def _render_rise_table(plots, t_div=1.0, t_unit="s"):
-    """Display 10–90% rise times as a well-plate grid table."""
-    _rre = re.compile(r'^([A-Za-z]+)(\d+)')
-    _grid, _rows, _cols, _other = {}, set(), set(), []
-    for _p in plots:
-        _rt, _, _ = compute_rise_time(_p["x"], _p["temp"])
-        _m = _rre.match(str(_p["label"]))
-        if _m:
-            _r, _c = _m.group(1).upper(), int(_m.group(2))
-            _rows.add(_r); _cols.add(_c)
-            _grid[(_r, _c)] = (_rt / t_div) if _rt is not None else None
-        else:
-            _other.append((_p["label"], (_rt / t_div) if _rt is not None else None))
-
-    st.markdown(f"**Rise time 10–90% ({t_unit})**")
-    if _rows:
-        _df = pd.DataFrame(index=sorted(_rows), columns=sorted(_cols), dtype=float)
-        _df.index.name = None
-        for (_r, _c), _v in _grid.items():
-            if _v is not None:
-                _df.loc[_r, _c] = _v
-        _html = _df.style.format("{:.2f}", na_rep="—").to_html()
-        st.markdown(_HEAT_TABLE_CSS + f"<div class='ht-wrap'>{_html}</div>",
-                    unsafe_allow_html=True)
-        if _other:
-            _oc = st.columns(len(_other))
-            for _col, (lbl, val) in zip(_oc, _other):
-                _col.metric(lbl, f"{val:.2f} {t_unit}" if val is not None else "—")
-    else:
-        _mc = st.columns(len(plots))
-        for _col, _p in zip(_mc, plots):
-            _rt, _, _ = compute_rise_time(_p["x"], _p["temp"])
-            _col.metric(_p["label"], f"{_rt/t_div:.2f} {t_unit}" if _rt else "—")
 
 
 # ----------------------------
@@ -891,6 +818,12 @@ with st.sidebar:
     st.markdown("#### Display")
     show_points = st.checkbox("Show data points", value=False)
 
+    st.divider()
+    if st.button("🔄 Clear analysis cache",
+                 help="Force re-analysis with current code (use after app updates)"):
+        st.cache_data.clear()
+        st.rerun()
+
 # If downsampling is disabled, replace _ds with a pass-through
 if not _use_downsample:
     def _ds(x, y, n=1800):
@@ -954,9 +887,6 @@ if not uploaded:
     st.stop()
 
 df = load_csv(uploaded)
-if st.button("🔄 Clear analysis cache", help="Force re-analysis with current code (use after app updates)"):
-    st.cache_data.clear()
-    st.rerun()
 df.columns = df.columns.str.strip()
 
 try:
@@ -1177,13 +1107,6 @@ if _align_rise:
     _rise_shifts = {lbl: (r if r is not None else _fallback)
                     for lbl, r in _detected.items()}
     _t_label = ("Time from rise (min)" if _time_mins else "Time from rise (s)")
-    with st.expander("Rise detection debug", expanded=True):
-        st.dataframe(pd.DataFrame([
-            {"Channel": lbl,
-             "Detected rise (s)": f"{r:.1f}" if r is not None else "MISSED",
-             "Shift applied (s)": f"{_rise_shifts[lbl]:.1f}"}
-            for lbl, r in _detected.items()
-        ]), use_container_width=True, hide_index=True)
 
 def _tx(p):
     """Return time array for p, shifted so rise lands at t=0 (display only)."""
@@ -1234,8 +1157,6 @@ if column_plot_mode:
     st.subheader("Column plot — Heat")
     _col_grid("y", "Heat (J)", "col_heat")
     _render_heat_table(results["plots"])
-    _render_rise_table(results["plots"], t_div=_t_div,
-                       t_unit="min" if _time_mins else "s")
     st.divider()
     st.subheader("Column plot — Power")
     _col_grid("power", "Power (W)", "col_power")
@@ -1303,8 +1224,6 @@ elif row_plot_mode:
                 st.plotly_chart(_fig, use_container_width=True)
 
     _render_heat_table(results["plots"])
-    _render_rise_table(results["plots"], t_div=_t_div,
-                       t_unit="min" if _time_mins else "s")
 
     st.divider()
 
@@ -1341,34 +1260,106 @@ elif array_plot_mode:
         else:
             _arr_other.append((_orig_i, _p))
 
+    # Single row letter (e.g. L1–L10): reflow as square grid
+    if len(_arr_rows) == 1 and _arr_map:
+        for (_r, _c), _entry in sorted(_arr_map.items(), key=lambda x: x[0][1]):
+            _arr_other.append(_entry)
+        _arr_map.clear(); _arr_rows.clear(); _arr_cols.clear()
+
     _sorted_arr_rows = sorted(_arr_rows)   # A, B, C, D  → screen rows (down)
     _sorted_arr_cols = sorted(_arr_cols)   # 1, 2, …, 6  → screen columns (across)
-    _n_scr_cols = max(len(_sorted_arr_cols), 1)
+    _arr_linear_mode = len(_arr_rows) == 0 and bool(_arr_other)
     _block_x = results["plots"][0]["x"]
     _block_y = results["plots"][0]["block_temp"]
     _arr_layout = {**PLOT_LAYOUT,
                    "margin": dict(l=45, r=8, t=28, b=28)}
 
     def _arr_grid(data_key, ylabel, uiprefix, height_per_row=200):
+        _h_sp, _v_sp = 0.02, 0.06
+
+        def _axis_sharing():
+            if _arr_axis_mode == "Scale individually":
+                return False, False
+            elif _arr_axis_mode == "Common range":
+                return "columns", True
+            else:
+                return "columns", "rows"
+
+        def _apply_common_range(fig, items_iter):
+            if _arr_axis_mode == "Common range":
+                _all_y = [v for _p in items_iter for v in _p[data_key] if np.isfinite(v)]
+                if _all_y:
+                    _pad = (max(_all_y) - min(_all_y)) * 0.05 or 0.5
+                    fig.update_yaxes(range=[min(_all_y) - _pad, max(_all_y) + _pad])
+
+        def _style_fig(fig, n_rows, margin):
+            fig.update_layout(
+                paper_bgcolor=PLOT_LAYOUT["paper_bgcolor"],
+                plot_bgcolor=PLOT_LAYOUT["plot_bgcolor"],
+                font=PLOT_LAYOUT["font"],
+                showlegend=False,
+                height=max(n_rows * height_per_row, 200),
+                margin=margin,
+                hovermode="x unified",
+                uirevision=uiprefix,
+            )
+            fig.update_xaxes(
+                gridcolor="#e0e0e0", linecolor="#aaaaaa", zerolinecolor="#cccccc",
+                showline=True, mirror=True, linewidth=1.2, tickfont=dict(size=13),
+            )
+            fig.update_yaxes(
+                gridcolor="#e0e0e0", linecolor="#aaaaaa", zerolinecolor="#cccccc",
+                showline=True, mirror=True, linewidth=1.2, tickfont=dict(size=13),
+            )
+
+        # ── Linear fallback: no well-plate grid detected ──────────────────
+        if _arr_linear_mode:
+            _nc = _n_lin_cols
+            _nr = (len(_arr_other) + _nc - 1) // _nc
+            _sx, _sy = _axis_sharing()
+            _titles = [_p["label"] for _, _p in _arr_other]
+            _titles += [""] * (_nr * _nc - len(_arr_other))
+            fig = make_subplots(
+                rows=_nr, cols=_nc,
+                shared_xaxes=_sx, shared_yaxes=_sy,
+                horizontal_spacing=_h_sp, vertical_spacing=_v_sp,
+                subplot_titles=_titles,
+            )
+            for _idx, (_oi, _p) in enumerate(_arr_other):
+                _ri = _idx // _nc + 1
+                _ci = _idx % _nc + 1
+                _dx, _dy = _ds(_tx(_p), _p[data_key])
+                fig.add_trace(go.Scattergl(
+                    x=_dx / _t_div, y=_dy,
+                    mode=_trace_mode, marker=_marker,
+                    line=dict(color=PALETTE[_oi % len(PALETTE)], width=2),
+                    showlegend=False,
+                ), row=_ri, col=_ci)
+                if data_key == "temp" and ref_channel is None:
+                    _bx, _by = _ds(_block_x, _block_y)
+                    fig.add_trace(go.Scattergl(
+                        x=_bx / _t_div, y=_by,
+                        mode=_trace_mode, marker=_marker,
+                        line=dict(color="#888888", width=1.2, dash="dash"),
+                        showlegend=False,
+                    ), row=_ri, col=_ci)
+            _apply_common_range(fig, (_p for _, _p in _arr_other))
+            fig.update_annotations(font_size=14)
+            _style_fig(fig, _nr, dict(l=40, r=40, t=40, b=30))
+            st.plotly_chart(fig, use_container_width=True)
+            return
+
+        # ── Well-plate grid ───────────────────────────────────────────────
         n_r = len(_sorted_arr_rows)
         n_c = len(_sorted_arr_cols)
         if n_r == 0 or n_c == 0:
             return
-        if _arr_axis_mode == "Scale individually":
-            shared_x, shared_y = False, False
-        elif _arr_axis_mode == "Common range":
-            shared_x, shared_y = "columns", True
-        else:  # Shared (row Y, col X)
-            shared_x, shared_y = "columns", "rows"
-        _h_sp, _v_sp = 0.02, 0.06
+        _sx, _sy = _axis_sharing()
         fig = make_subplots(
             rows=n_r, cols=n_c,
-            shared_xaxes=shared_x,
-            shared_yaxes=shared_y,
-            horizontal_spacing=_h_sp,
-            vertical_spacing=_v_sp,
+            shared_xaxes=_sx, shared_yaxes=_sy,
+            horizontal_spacing=_h_sp, vertical_spacing=_v_sp,
         )
-        # Edge labels: column numbers across top, row letters down left
         _pw = (1 - (n_c - 1) * _h_sp) / n_c
         _ph = (1 - (n_r - 1) * _v_sp) / n_r
         for ci, _sc in enumerate(_sorted_arr_cols):
@@ -1406,31 +1397,8 @@ elif array_plot_mode:
                             line=dict(color="#888888", width=1.2, dash="dash"),
                             showlegend=False,
                         ), row=ri + 1, col=ci + 1)
-        fig.update_layout(
-            paper_bgcolor=PLOT_LAYOUT["paper_bgcolor"],
-            plot_bgcolor=PLOT_LAYOUT["plot_bgcolor"],
-            font=PLOT_LAYOUT["font"],
-            showlegend=False,
-            height=max(n_r * height_per_row, 200),
-            margin=dict(l=40, r=80, t=75, b=30),
-            hovermode="x unified",
-            uirevision=uiprefix,
-        )
-        fig.update_xaxes(
-            gridcolor="#e0e0e0", linecolor="#aaaaaa", zerolinecolor="#cccccc",
-            showline=True, mirror=True, linewidth=1.2,
-            tickfont=dict(size=13),
-        )
-        fig.update_yaxes(
-            gridcolor="#e0e0e0", linecolor="#aaaaaa", zerolinecolor="#cccccc",
-            showline=True, mirror=True, linewidth=1.2,
-            tickfont=dict(size=13),
-        )
-        if _arr_axis_mode == "Common range":
-            _all_y = [v for (_, _p) in _arr_map.values() for v in _p[data_key] if np.isfinite(v)]
-            if _all_y:
-                _pad = (max(_all_y) - min(_all_y)) * 0.05 or 0.5
-                fig.update_yaxes(range=[min(_all_y) - _pad, max(_all_y) + _pad])
+        _apply_common_range(fig, (_p for _, _p in _arr_map.values()))
+        _style_fig(fig, n_r, dict(l=40, r=80, t=75, b=30))
         st.plotly_chart(fig, use_container_width=True)
         if _arr_other:
             st.markdown("**Other channels**")
@@ -1450,7 +1418,7 @@ elif array_plot_mode:
                         uirevision=f"{uiprefix}_other{_ci2}")
                     st.plotly_chart(_fig, use_container_width=True)
 
-    _ctrl_l, _ctrl_r = st.columns([3, 1])
+    _ctrl_l, _ctrl_m, _ctrl_r = st.columns([3, 1, 1])
     with _ctrl_l:
         _arr_axis_mode = st.radio(
             "Axis scaling",
@@ -1460,6 +1428,16 @@ elif array_plot_mode:
                  "Shared: Y shared within each row, X shared within each column.\n"
                  "Scale individually: each panel auto-scales independently.",
         )
+    with _ctrl_m:
+        if _arr_linear_mode:
+            _default_cols = int(np.ceil(np.sqrt(len(_arr_other))))
+            _n_lin_cols = int(st.number_input(
+                "Columns", min_value=1, max_value=12,
+                value=_default_cols, step=1,
+                help="Number of columns in the grid layout.",
+            ))
+        else:
+            _n_lin_cols = 4
     with _ctrl_r:
         st.markdown("<div style='padding-top:28px'></div>", unsafe_allow_html=True)
         st.toggle("Minutes", key="_time_mins", help="Display time axis in minutes instead of seconds.")
@@ -1470,8 +1448,6 @@ elif array_plot_mode:
     st.subheader("Array plot — Heat")
     _arr_grid("y", "Heat (J)", "arr_heat")
     _render_heat_table(results["plots"])
-    _render_rise_table(results["plots"], t_div=_t_div,
-                       t_unit="min" if _time_mins else "s")
     st.divider()
     st.subheader("Array plot — Power")
     _arr_grid("power", "P (W)", "arr_power")
@@ -1517,8 +1493,6 @@ else:
     st.plotly_chart(fig2, use_container_width=True)
 
     _render_heat_table(results["plots"])
-    _render_rise_table(results["plots"], t_div=_t_div,
-                       t_unit="min" if _time_mins else "s")
 
     st.divider()
 
